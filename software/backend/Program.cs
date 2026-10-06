@@ -2,6 +2,7 @@ using System.Text;
 using backend.Data;
 using backend.DTOs;
 using backend.Services;
+using backend.Services.Ai;
 using backend.Validators;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -46,6 +47,22 @@ builder.Services.AddCors(options =>
 
 // Application services
 builder.Services.AddScoped<AuthService>();
+
+// AI (specs/06-ai-features-spec.md). The API key is optional at startup so the
+// rest of the app — and CI — runs without one; AI calls fail cleanly instead.
+builder.Services.Configure<DeepSeekOptions>(builder.Configuration.GetSection("DeepSeek"));
+builder.Services.AddHttpClient<DeepSeekChatModel>();
+builder.Services.AddScoped<AiUsageTracker>();
+builder.Services.AddScoped<ChatQuotaService>();
+builder.Services.AddScoped<ChatToolExecutor>();
+builder.Services.AddScoped<ChatAssistantService>();
+builder.Services.AddSingleton(TimeProvider.System);
+// Business code asks for IChatModel and gets the provider wrapped in the
+// usage-tracking decorator.
+builder.Services.AddScoped<IChatModel>(sp => new UsageTrackingChatModel(
+    sp.GetRequiredService<DeepSeekChatModel>(),
+    sp.GetRequiredService<AiUsageTracker>(),
+    sp.GetRequiredService<ILogger<UsageTrackingChatModel>>()));
 
 // FluentValidation
 builder.Services.AddScoped<IValidator<RegisterRequest>, RegisterRequestValidator>();

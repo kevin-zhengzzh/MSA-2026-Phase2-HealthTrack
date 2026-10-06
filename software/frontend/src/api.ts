@@ -1,5 +1,6 @@
-import type { AuthResponse, CaloriesLeaderboardEntry, CheckIn, CheckinTodayLeaderboardEntry, CheckInResult, LeaderboardEntry, PointTransaction, RewardStatus, Skin, StreakLeaderboardEntry, User, WorkoutRecord, WorkoutSubmitResult } from './types'
+import type { AuthResponse, CaloriesLeaderboardEntry, ChatQuota, ChatStreamEvent, ChatTurn, CheckIn, CheckinTodayLeaderboardEntry, CheckInResult, LeaderboardEntry, PointTransaction, RewardStatus, Skin, StreakLeaderboardEntry, User, WorkoutRecord, WorkoutSubmitResult } from './types'
 import { useStore } from './store'
+import { createSseParser } from './sse'
 
 const ORIGIN = import.meta.env.VITE_API_URL ?? 'http://localhost:5000'
 const BASE = `${ORIGIN}/api`
@@ -192,3 +193,40 @@ export const updateWorkout = (id: number, workoutType: string, calories: number)
 
 export const deleteWorkout = (id: number) =>
   request<void>(`/workout/${id}`, { method: 'DELETE' })
+
+// AI chat assistant
+export const getChatQuota = () => request<ChatQuota>('/ai/chat/quota')
+
+// POST /ai/chat answers with Server-Sent Events, which EventSource can't
+// consume (no POST body, no Authorization header) — so the response body is
+// read as a stream and parsed incrementally. Validation/quota failures arrive
+// as a normal JSON error before the stream starts and are thrown like any
+// other request error; failures after that arrive as an "error" event.
+export async function streamChat(
+  history: ChatTurn[],
+  message: string,
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  const hadToken = !!localStorage.getItem('token')
+  const res = await fetch(`${BASE}/ai/chat?localDate=${localDateStr()}`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ history, message }),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    if (res.status === 401) handleUnauthorized(hadToken)
+    const err = await res.json().catch(() => ({ message: res.statusText }))
+    throw new Error(extractErrorMessage(err, 'The AI assistant is unavailable right now.'))
+  }
+
+  const parse = createSseParser((data) => onEvent(JSON.parse(data) as ChatStreamEvent))
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    parse(decoder.decode(value, { stream: true }))
+  }
+}

@@ -9,6 +9,7 @@ import DailyTasksMenu from './components/DailyTasksMenu'
 import StoreModal from './components/StoreModal'
 import PointsHistoryModal from './components/PointsHistoryModal'
 import ToastContainer from './components/ToastContainer'
+import ChatWidget from './components/ChatWidget'
 import Dashboard from './pages/Dashboard'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -216,6 +217,7 @@ function PrivateLayout() {
       </div>
       {storeOpen && <StoreModal onClose={() => setStoreOpen(false)} />}
       {pointsOpen && <PointsHistoryModal onClose={() => setPointsOpen(false)} />}
+      <ChatWidget />
     </div>
   )
 }

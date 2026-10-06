@@ -15,6 +15,7 @@ Two different tools were used at two different stages: **Claude (web chat)** for
 | [03-ai-prompt-log-web.md](./03-ai-prompt-log-web.md) | Early architecture & scope decisions from Claude web-chat planning, pre-code |
 | [04-ai-prompt-log-vscode.md](./04-ai-prompt-log-vscode.md) | Curated, real, decision-point prompts from Claude Code sessions across the whole build |
 | [05-design-decisions.md](./05-design-decisions.md) | Key design decisions synthesized from the logs above, with two state diagrams |
+| [06-ai-features-spec.md](./06-ai-features-spec.md) | Spec for the post-submission AI extension (chat assistant with tool calling, weekly summary) — the source of truth for all AI-related work ([中文版](./06-ai-features-spec.zh-CN.md)) |
 
 ## Timeline
 

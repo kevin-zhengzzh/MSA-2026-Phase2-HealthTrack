@@ -13,6 +13,10 @@ namespace backend.Controllers;
 [Authorize]
 public class CheckInController : ControllerBase
 {
+    // Consecutive check-ins that unlock the reward-only Dark skin. Shared with
+    // the AI chat tools so both report the same milestone.
+    public const int RewardSkinStreak = 7;
+
     private readonly AppDbContext _db;
 
     public CheckInController(AppDbContext db) => _db = db;
@@ -79,7 +83,7 @@ public class CheckInController : ControllerBase
     // call on every check-in once the threshold has been passed.
     private async Task GrantStreakRewardSkin(int streak)
     {
-        if (streak < 7) return;
+        if (streak < RewardSkinStreak) return;
 
         var alreadyOwnsReward = await _db.UserSkins
             .AnyAsync(us => us.UserId == UserId && us.Skin.IsReward);

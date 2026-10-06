@@ -13,6 +13,7 @@ public class AppDbContext : DbContext
     public DbSet<UserSkin> UserSkins { get; set; }
     public DbSet<WorkoutRecord> WorkoutRecords { get; set; }
     public DbSet<PointTransaction> PointTransactions { get; set; }
+    public DbSet<AiUsageLog> AiUsageLogs { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,6 +33,10 @@ public class AppDbContext : DbContext
         // Speeds up fetching a user's point history in chronological order
         modelBuilder.Entity<PointTransaction>()
             .HasIndex(p => new { p.UserId, p.CreatedAt });
+
+        // Speeds up the daily chat quota count ("this user's rows since 00:00 UTC")
+        modelBuilder.Entity<AiUsageLog>()
+            .HasIndex(a => new { a.UserId, a.CreatedAt });
 
         // UserSkin uses composite primary key
         modelBuilder.Entity<UserSkin>()

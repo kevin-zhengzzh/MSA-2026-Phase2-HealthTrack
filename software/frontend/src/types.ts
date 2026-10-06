@@ -122,6 +122,24 @@ export interface AuthResponse {
   username: string
 }
 
+// AI chat assistant — see specs/06-ai-features-spec.md §7
+export interface ChatTurn {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export interface ChatQuota {
+  used: number
+  limit: number
+  remaining: number
+}
+
+export type ChatStreamEvent =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; name: string }
+  | { type: 'done'; remaining: number }
+  | { type: 'error'; message: string }
+
 // Maps theme name → preview hex color
 export const THEME_COLORS: Record<string, { primary: string; light: string }> = {
   default:  { primary: '#16a34a', light: '#dcfce7' },
