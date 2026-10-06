@@ -4,4 +4,5 @@ namespace backend.DTOs;
 // can never inject a system message (spec D-7).
 public record AiChatTurn(string Role, string Text);
 
-public record AiChatRequest(List<AiChatTurn>? History, string Message);
+// Mode is the optional topic pill (spec §5.3): "review", "advice", "rank", "points" or "goal"
+public record AiChatRequest(List<AiChatTurn>? History, string Message, string? Mode = null);

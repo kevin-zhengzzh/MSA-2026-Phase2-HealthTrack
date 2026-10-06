@@ -3,30 +3,44 @@ import ReactMarkdown from 'react-markdown'
 import { getChatQuota, streamChat } from '../api'
 import type { ChatQuota, ChatTurn } from '../types'
 
-// AI chat assistant (specs/06-ai-features-spec.md §5.1). A floating button in
+// AI chat assistant (specs/06-ai-features-spec.md §5.1, §5.3). A floating button in
 // the same right-hand column as RecordButton (bottom-6) and BackToTopButton
 // (bottom-24), one step above them so it never overlaps either (CA-1).
 
 const MAX_MESSAGE_LENGTH = 1000 // matches ChatAssistantService.MaxMessageLength
 const MAX_HISTORY_TURNS = 20 // CA-7; the server caps it too
 
-// Demo-friendly starters (CA-2), one per tool/range so each path gets exercised
-const SUGGESTIONS = [
-  'How did I do this week?',
-  'How close am I to my weekly goal?',
-  'How many check-ins until the reward skin?',
-  'How many workouts did I do last month?',
+// Topic pills above the input (spec §5.3). Picking one sends its id as `mode`,
+// which gives the model topic-specific instructions and only the tools that
+// topic needs. Sending with an empty input uses the pill's default prompt.
+// Ids must match ChatModes on the backend.
+interface ChatModeOption {
+  id: string
+  label: string
+  prompt: string
+}
+
+const MODES: ChatModeOption[] = [
+  { id: 'review', label: '📊 Weekly review', prompt: 'How is my week going?' },
+  { id: 'advice', label: '💡 Workout advice', prompt: 'Based on my recent workouts, what should I do next?' },
+  { id: 'rank', label: '🏆 Rank', prompt: 'Where do I stand on the leaderboards?' },
+  { id: 'points', label: '🪙 Points', prompt: 'Summarize my points and any unclaimed rewards.' },
+  { id: 'goal', label: '🎯 Goal', prompt: 'How close am I to my weekly goal?' },
 ]
 
 const TOOL_LABELS: Record<string, string> = {
   get_workout_summary: 'Checking your workouts…',
   get_checkin_status: 'Checking your check-in streak…',
   get_weekly_goal_progress: 'Checking your weekly goal…',
+  get_rank: 'Checking the leaderboards…',
+  get_points_summary: 'Checking your points…',
 }
 
 interface Message {
   role: 'user' | 'assistant'
   text: string
+  // The topic pill a user message was sent with, shown as a badge
+  mode?: ChatModeOption
   // Failed exchanges stay visible but are left out of the history sent back
   failed?: boolean
 }
@@ -58,6 +72,8 @@ export default function ChatWidget() {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
+  // Stays selected for follow-ups until the user clears it, like a tool toggle
+  const [mode, setMode] = useState<ChatModeOption | null>(null)
   const [busy, setBusy] = useState(false)
   const [toolStatus, setToolStatus] = useState<string | null>(null)
   const [quota, setQuota] = useState<ChatQuota | null>(null)
@@ -86,8 +102,8 @@ export default function ChatWidget() {
 
   const outOfQuota = quota?.remaining === 0
 
-  async function send(text: string, base: Message[]) {
-    const message = text.trim()
+  async function send(text: string, base: Message[], withMode: ChatModeOption | null) {
+    const message = text.trim() || withMode?.prompt || ''
     if (!message || busy || outOfQuota) return
 
     const history: ChatTurn[] = base
@@ -95,7 +111,7 @@ export default function ChatWidget() {
       .slice(-MAX_HISTORY_TURNS)
       .map(({ role, text }) => ({ role, text }))
 
-    setMessages([...base, { role: 'user', text: message }, { role: 'assistant', text: '' }])
+    setMessages([...base, { role: 'user', text: message, mode: withMode ?? undefined }, { role: 'assistant', text: '' }])
     setInput('')
     setError(null)
     setBusy(true)
@@ -113,7 +129,7 @@ export default function ChatWidget() {
 
     try {
       const outcome: { error: string | null } = { error: null }
-      await streamChat(history, message, (event) => {
+      await streamChat(history, message, withMode?.id ?? null, (event) => {
         switch (event.type) {
           case 'text':
             setToolStatus(null)
@@ -146,8 +162,10 @@ export default function ChatWidget() {
   // Re-send the last user message, discarding the failed exchange (CA-9)
   function retry() {
     const index = messages.map((m) => m.role).lastIndexOf('user')
-    if (index !== -1) send(messages[index].text, messages.slice(0, index))
+    if (index !== -1) send(messages[index].text, messages.slice(0, index), messages[index].mode ?? null)
   }
+
+  const submit = () => send(input, messages, mode)
 
   const last = messages[messages.length - 1]
   const waitingForFirstText = busy && last?.role === 'assistant' && !last.text
@@ -198,35 +216,21 @@ export default function ChatWidget() {
 
       <div ref={listRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3" aria-live="polite">
         {messages.length === 0 && (
-          <div className="space-y-3">
-            <p className="text-sm text-[var(--text-secondary)]">
-              Ask me about your workouts, check-in streak, or weekly goal.
-            </p>
-            <div className="flex flex-col gap-2">
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => send(s, [])}
-                  disabled={outOfQuota}
-                  className="text-left text-sm px-3 py-2 rounded-xl border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-inset)] disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
+          <p className="text-sm text-[var(--text-secondary)]">
+            Ask me anything about your workouts, streak, goal, rank or points — or pick a topic below.
+          </p>
         )}
 
         {messages.map((m, i) =>
           m.role === 'user' ? (
             <div key={i} className="flex justify-end">
-              <p
-                className={`max-w-[85%] px-3 py-2 rounded-2xl rounded-br-sm text-sm whitespace-pre-wrap break-words ${m.failed ? 'opacity-60' : ''}`}
+              <div
+                className={`max-w-[85%] px-3 py-2 rounded-2xl rounded-br-sm text-sm ${m.failed ? 'opacity-60' : ''}`}
                 style={{ backgroundColor: 'var(--primary)', color: 'white' }}
               >
-                {m.text}
-              </p>
+                {m.mode && <p className="text-[11px] font-medium opacity-80 mb-0.5">{m.mode.label}</p>}
+                <p className="whitespace-pre-wrap break-words">{m.text}</p>
+              </div>
             </div>
           ) : m.text ? (
             <div key={i} className="flex justify-start">
@@ -265,7 +269,7 @@ export default function ChatWidget() {
         className="border-t border-[var(--border)] p-3"
         onSubmit={(e) => {
           e.preventDefault()
-          send(input, messages)
+          submit()
         }}
       >
         {outOfQuota ? (
@@ -273,6 +277,31 @@ export default function ChatWidget() {
             You've used all {quota?.limit} messages for today. Come back tomorrow!
           </p>
         ) : (
+          <>
+          {/* Topic pills — horizontally scrollable so they fit on narrow screens */}
+          <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1" role="group" aria-label="Topics">
+            {MODES.map((m) => {
+              const selected = mode?.id === m.id
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => {
+                    setMode(selected ? null : m)
+                    inputRef.current?.focus()
+                  }}
+                  className={`flex-shrink-0 flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition cursor-pointer ${
+                    selected ? 'text-white border-transparent' : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-inset)]'
+                  }`}
+                  style={selected ? { backgroundColor: 'var(--primary)' } : undefined}
+                >
+                  {m.label}
+                  {selected && <span aria-hidden="true">×</span>}
+                </button>
+              )
+            })}
+          </div>
           <div className="flex items-end gap-2">
             <textarea
               ref={inputRef}
@@ -282,24 +311,25 @@ export default function ChatWidget() {
                 // Enter sends; Shift+Enter adds a newline
                 if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault()
-                  send(input, messages)
+                  submit()
                 }
               }}
               rows={1}
               maxLength={MAX_MESSAGE_LENGTH}
-              placeholder="Ask about your progress…"
+              placeholder={mode ? 'Add details, or just send' : 'Ask about your progress…'}
               aria-label="Message"
               className="flex-1 resize-none max-h-28 px-3 py-2 text-sm rounded-xl border border-[var(--border)] bg-[var(--bg-page)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--primary-light)]"
             />
             <button
               type="submit"
-              disabled={busy || !input.trim()}
+              disabled={busy || (!input.trim() && !mode)}
               className="px-3 py-2 text-sm font-medium text-white rounded-xl disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               style={{ backgroundColor: 'var(--primary)' }}
             >
               Send
             </button>
           </div>
+          </>
         )}
         <p className="mt-2 text-[11px] text-[var(--text-secondary)] text-center">
           AI answers can be wrong. Not medical advice.

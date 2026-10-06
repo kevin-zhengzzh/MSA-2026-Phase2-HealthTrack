@@ -134,6 +134,13 @@ export interface ChatQuota {
   remaining: number
 }
 
+export interface WeeklySummary {
+  weekStart: string // yyyy-MM-dd, Monday
+  weekEnd: string // yyyy-MM-dd, Sunday
+  summary: string
+  source: 'ai' | 'cache' | 'fallback'
+}
+
 export type ChatStreamEvent =
   | { type: 'text'; text: string }
   | { type: 'tool'; name: string }

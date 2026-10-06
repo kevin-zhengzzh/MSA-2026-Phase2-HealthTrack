@@ -114,12 +114,14 @@ public class CheckInController : ControllerBase
         var user = await _db.Users.FindAsync(UserId);
         if (user is null) return NotFound();
 
-        // Update streak
+        // Update streak. Continuation is judged by whether a check-in exists for
+        // the user's local yesterday — not by LastCheckIn, which is a UTC instant:
+        // in UTC+12/13 a morning check-in falls on the previous UTC date, which
+        // used to reset the streak the next morning.
         var yesterday = today.AddDays(-1);
-        user.Streak = user.LastCheckIn.HasValue &&
-                      DateOnly.FromDateTime(user.LastCheckIn.Value) == yesterday
-            ? user.Streak + 1
-            : 1;
+        var checkedInYesterday = await _db.CheckIns
+            .AnyAsync(c => c.UserId == UserId && c.Date == yesterday);
+        user.Streak = checkedInYesterday ? user.Streak + 1 : 1;
         user.LastCheckIn = DateTime.UtcNow;
 
         // Points: 10 base + (streak × 2) bonus, capped at 50 bonus.

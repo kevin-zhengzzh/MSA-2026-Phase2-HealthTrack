@@ -142,7 +142,10 @@ public class ChatToolExecutorTests
         var db = NewDb();
         var me = await db.Users.FindAsync(Me);
         me!.Streak = 5;
-        me.LastCheckIn = new DateTime(2026, 10, 6, 9, 0, 0, DateTimeKind.Utc);
+        // A New Zealand morning check-in "yesterday" (10-06 local) is 10-05 in
+        // UTC — the streak must still count as alive, judged by the local date
+        me.LastCheckIn = new DateTime(2026, 10, 5, 20, 0, 0, DateTimeKind.Utc);
+        db.CheckIns.Add(new CheckIn { UserId = Me, Date = Today.AddDays(-1) });
         await db.SaveChangesAsync();
         var (executor, _) = NewExecutor(db);
 
@@ -160,7 +163,7 @@ public class ChatToolExecutorTests
         var db = NewDb();
         var me = await db.Users.FindAsync(Me);
         me!.Streak = 5;
-        me.LastCheckIn = new DateTime(2026, 10, 4, 9, 0, 0, DateTimeKind.Utc);
+        db.CheckIns.Add(new CheckIn { UserId = Me, Date = Today.AddDays(-3) });
         await db.SaveChangesAsync();
         var (executor, _) = NewExecutor(db);
 
@@ -215,10 +218,96 @@ public class ChatToolExecutorTests
     }
 
     [Fact]
-    public void Definitions_CoverTheThreeP0Tools()
+    public void Definitions_CoverAllFiveTools()
     {
         Assert.Equal(
-            [ChatToolExecutor.WorkoutSummary, ChatToolExecutor.CheckInStatus, ChatToolExecutor.WeeklyGoalProgress],
+            [ChatToolExecutor.WorkoutSummary, ChatToolExecutor.CheckInStatus, ChatToolExecutor.WeeklyGoalProgress,
+             ChatToolExecutor.Rank, ChatToolExecutor.PointsSummary],
             ChatToolExecutor.Definitions.Select(d => d.Name));
+    }
+
+    [Fact]
+    public void DefinitionsFor_NullMeansAllToolsAndAListNarrowsThem()
+    {
+        Assert.Same(ChatToolExecutor.Definitions, ChatToolExecutor.DefinitionsFor(null));
+        Assert.Equal([ChatToolExecutor.Rank], ChatToolExecutor.DefinitionsFor([ChatToolExecutor.Rank]).Select(d => d.Name));
+    }
+
+    // ---- T-4 get_rank ----
+
+    [Fact]
+    public async Task Rank_MatchesLeaderboardOrderingAndReturnsOnlyMyPosition()
+    {
+        var db = NewDb();
+        var me = await db.Users.FindAsync(Me);
+        me!.Points = 120;
+        me.Streak = 2;
+        var other = await db.Users.FindAsync(SomeoneElse);
+        other!.Points = 150;
+        other.Streak = 2;   // tie on streak: lower Id ranks first, like LeaderboardController
+        db.WorkoutRecords.AddRange(Workout(Me, Today, 400), Workout(SomeoneElse, Today, 300));
+        db.CheckIns.AddRange(
+            new CheckIn { UserId = SomeoneElse, Date = Today, CreatedAt = new DateTime(2026, 10, 6, 19, 0, 0, DateTimeKind.Utc) },
+            new CheckIn { UserId = Me, Date = Today, CreatedAt = new DateTime(2026, 10, 6, 20, 0, 0, DateTimeKind.Utc) });
+        await db.SaveChangesAsync();
+        var (executor, _) = NewExecutor(db);
+
+        var result = await Run(executor, ChatToolExecutor.Rank);
+
+        Assert.Equal(2, result.GetProperty("totalUsers").GetInt32());
+        var points = result.GetProperty("points");
+        Assert.Equal(2, points.GetProperty("rank").GetInt32());
+        Assert.Equal(30, points.GetProperty("behindNextRank").GetInt32());
+        var streak = result.GetProperty("streak");
+        Assert.Equal(1, streak.GetProperty("rank").GetInt32());
+        Assert.Equal(JsonValueKind.Null, streak.GetProperty("behindNextRank").ValueKind);
+        Assert.Equal(1, result.GetProperty("caloriesToday").GetProperty("rank").GetInt32());
+        Assert.Equal(2, result.GetProperty("earliestCheckInToday").GetProperty("rank").GetInt32());
+        // Nothing identifying the other user leaks into the result (D-4)
+        Assert.DoesNotContain("other", result.GetRawText());
+    }
+
+    [Fact]
+    public async Task Rank_NotCheckedInToday_HasNoCheckInRank()
+    {
+        var (executor, _) = NewExecutor(NewDb());
+
+        var result = await Run(executor, ChatToolExecutor.Rank);
+
+        var checkIn = result.GetProperty("earliestCheckInToday");
+        Assert.False(checkIn.GetProperty("checkedInToday").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, checkIn.GetProperty("rank").ValueKind);
+    }
+
+    // ---- T-5 get_points_summary ----
+
+    [Fact]
+    public async Task PointsSummary_ReportsBalanceRecentActivityAndUnclaimedRewards()
+    {
+        var db = NewDb();
+        var me = await db.Users.FindAsync(Me);
+        me!.Points = 230;
+        db.PointTransactions.AddRange(
+            new PointTransaction { UserId = Me, Amount = 20, Reason = "Daily check-in", CreatedAt = new DateTime(2026, 10, 6, 8, 0, 0, DateTimeKind.Utc) },
+            new PointTransaction { UserId = Me, Amount = -100, Reason = "Purchased Ocean", CreatedAt = new DateTime(2026, 10, 5, 8, 0, 0, DateTimeKind.Utc) },
+            new PointTransaction { UserId = Me, Amount = 50, Reason = "Daily check-in", CreatedAt = new DateTime(2026, 9, 1, 8, 0, 0, DateTimeKind.Utc) },  // older than 7 days
+            new PointTransaction { UserId = SomeoneElse, Amount = 999, Reason = "Daily check-in", CreatedAt = new DateTime(2026, 10, 6, 8, 0, 0, DateTimeKind.Utc) });
+        db.CheckIns.Add(new CheckIn { UserId = Me, Date = Today, PointsEarned = 14, Claimed = false });
+        db.WorkoutRecords.Add(new WorkoutRecord { UserId = Me, Date = Today, Calories = 300, WorkoutType = "Gym", PointsEarned = 10, Claimed = true });
+        await db.SaveChangesAsync();
+        var (executor, _) = NewExecutor(db);
+
+        var result = await Run(executor, ChatToolExecutor.PointsSummary);
+
+        Assert.Equal(230, result.GetProperty("balance").GetInt32());
+        Assert.Equal(20, result.GetProperty("earnedLast7Days").GetInt32());
+        Assert.Equal(100, result.GetProperty("spentLast7Days").GetInt32());
+        var unclaimed = result.GetProperty("unclaimedToday");
+        Assert.Equal(14, unclaimed.GetProperty("checkIn").GetInt32());
+        Assert.Equal(0, unclaimed.GetProperty("workout").GetInt32());   // already claimed
+        Assert.Equal(14, unclaimed.GetProperty("total").GetInt32());
+        var recent = result.GetProperty("recentTransactions");
+        Assert.Equal(3, recent.GetArrayLength());   // only my transactions
+        Assert.Equal("Daily check-in", recent[0].GetProperty("reason").GetString());
     }
 }

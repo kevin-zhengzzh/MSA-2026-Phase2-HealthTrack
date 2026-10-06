@@ -25,7 +25,7 @@ public class ChatAssistantService
     // §9 — kept verbatim in the spec; update both together
     private const string SystemPrompt =
         "You are the HealthTrack assistant. You help the signed-in user understand their own workouts, " +
-        "check-ins, streaks, and goals in this app. Whenever an answer depends on the user's data, call the " +
+        "check-ins, streaks, goals, leaderboard ranks and points in this app. Whenever an answer depends on the user's data, call the " +
         "relevant tool first — even for follow-up questions and even if earlier messages mention numbers, " +
         "because data can change and earlier replies may be incomplete. Never guess or invent numbers. " +
         "Call tools directly without announcing that you are about to look something up. " +
@@ -47,9 +47,12 @@ public class ChatAssistantService
         DateOnly today,
         IReadOnlyList<AiChatTurn>? history,
         string message,
+        ChatMode? mode = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var messages = BuildMessages(today, history, message);
+        var messages = BuildMessages(today, history, message, mode);
+        // A picked topic narrows the tools to what it needs (spec §5.3)
+        var tools = ChatToolExecutor.DefinitionsFor(mode?.Tools);
         // Models sometimes say a sentence before calling a tool; without a break
         // it would run straight into the next round's answer ("...progress.This week").
         var needsBreak = false;
@@ -57,7 +60,7 @@ public class ChatAssistantService
         for (var call = 0; call < MaxModelCalls; call++)
         {
             ChatResponse? response = null;
-            await foreach (var e in _model.StreamAsync(new ChatRequest(messages, ChatToolExecutor.Definitions, MaxReplyTokens), ct))
+            await foreach (var e in _model.StreamAsync(new ChatRequest(messages, tools, MaxReplyTokens), ct))
             {
                 if (e is TextDelta delta)
                 {
@@ -88,13 +91,14 @@ public class ChatAssistantService
         yield return new AssistantText(LoopLimitReply);
     }
 
-    internal static List<ChatMessage> BuildMessages(DateOnly today, IReadOnlyList<AiChatTurn>? history, string message)
+    internal static List<ChatMessage> BuildMessages(DateOnly today, IReadOnlyList<AiChatTurn>? history, string message, ChatMode? mode = null)
     {
-        List<ChatMessage> messages =
-        [
-            // Invariant culture so the date reads the same on any server locale
-            ChatMessage.System($"{SystemPrompt}\n\nToday is {today.ToString("dddd, yyyy-MM-dd", CultureInfo.InvariantCulture)} in the user's time zone."),
-        ];
+        // Invariant culture so the date reads the same on any server locale
+        var system = $"{SystemPrompt}\n\nToday is {today.ToString("dddd, yyyy-MM-dd", CultureInfo.InvariantCulture)} in the user's time zone.";
+        if (mode is not null)
+            system += $"\n\nThe user picked a topic for this message. {mode.Instructions}";
+
+        List<ChatMessage> messages = [ChatMessage.System(system)];
 
         foreach (var turn in (history ?? []).Where(t => !string.IsNullOrWhiteSpace(t.Text)).TakeLast(MaxHistoryTurns))
         {

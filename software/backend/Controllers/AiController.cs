@@ -17,13 +17,20 @@ public class AiController : ControllerBase
 
     private readonly ChatQuotaService _quota;
     private readonly ChatAssistantService _assistant;
+    private readonly WeeklySummaryService _weeklySummary;
     private readonly AiUsageTracker _tracker;
     private readonly ILogger<AiController> _logger;
 
-    public AiController(ChatQuotaService quota, ChatAssistantService assistant, AiUsageTracker tracker, ILogger<AiController> logger)
+    public AiController(
+        ChatQuotaService quota,
+        ChatAssistantService assistant,
+        WeeklySummaryService weeklySummary,
+        AiUsageTracker tracker,
+        ILogger<AiController> logger)
     {
         _quota = quota;
         _assistant = assistant;
+        _weeklySummary = weeklySummary;
         _tracker = tracker;
         _logger = logger;
     }
@@ -49,6 +56,9 @@ public class AiController : ControllerBase
             return BadRequest(new { message = "Message cannot be empty." });
         if (message.Length > ChatAssistantService.MaxMessageLength)
             return BadRequest(new { message = $"Message must be {ChatAssistantService.MaxMessageLength} characters or fewer." });
+        var mode = ChatModes.Find(req.Mode);
+        if (req.Mode is not null && mode is null)
+            return BadRequest(new { message = $"Unknown mode \"{req.Mode}\"." });
 
         var quota = await _quota.GetAsync(UserId, ct);
         if (quota.Exhausted)
@@ -63,7 +73,7 @@ public class AiController : ControllerBase
         var today = CheckInController.ResolveToday(localDate);
         try
         {
-            await foreach (var e in _assistant.RunAsync(UserId, today, req.History, message, ct))
+            await foreach (var e in _assistant.RunAsync(UserId, today, req.History, message, mode, ct))
             {
                 object payload = e switch
                 {
@@ -93,6 +103,28 @@ public class AiController : ControllerBase
         }
 
         return new EmptyResult();
+    }
+
+    // Summary of the last complete week (spec §5.2). lang comes from the
+    // browser (navigator.language); only model calls are logged, not cache hits
+    // or the no-data fallback.
+    [HttpGet("weekly-summary")]
+    public async Task<IActionResult> GetWeeklySummary([FromQuery] string? lang, [FromQuery] string? localDate, CancellationToken ct)
+    {
+        var today = CheckInController.ResolveToday(localDate);
+        try
+        {
+            var result = await _weeklySummary.GetAsync(UserId, today, lang, ct);
+            if (result.Source == WeeklySummaryService.SourceAi)
+                await _tracker.SaveAsync(UserId, AiFeatures.WeeklySummary, success: true);
+            return Ok(result);
+        }
+        catch (ChatModelException ex)
+        {
+            _logger.LogError(ex, "Weekly summary failed for user {UserId}", UserId);
+            await _tracker.SaveAsync(UserId, AiFeatures.WeeklySummary, success: false, error: ex.Message);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = "Summary unavailable right now." });
+        }
     }
 
     private async Task WriteEventAsync(object payload, CancellationToken ct)

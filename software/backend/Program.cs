@@ -56,6 +56,7 @@ builder.Services.AddScoped<AiUsageTracker>();
 builder.Services.AddScoped<ChatQuotaService>();
 builder.Services.AddScoped<ChatToolExecutor>();
 builder.Services.AddScoped<ChatAssistantService>();
+builder.Services.AddScoped<WeeklySummaryService>();
 builder.Services.AddSingleton(TimeProvider.System);
 // Business code asks for IChatModel and gets the provider wrapped in the
 // usage-tracking decorator.

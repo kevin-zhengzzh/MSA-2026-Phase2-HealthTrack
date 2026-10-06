@@ -2,7 +2,7 @@
 
 > 本文件是 [06-ai-features-spec.md](./06-ai-features-spec.md) 的中文版。两个版本需要同步修改；内容不一致时，以英文版为准。
 
-**状态：** 进行中，P0 后端和前端已完成；剩下浏览器手动检查和部署
+**状态：** P0 已上线（2026-10-07，commit `45fce57`）；P1 和 P2（演示数据、每周总结、T-4/T-5、话题按钮）已在本地完成，尚未部署
 **创建日期：** 2026-10-06
 **截止时间：** 1 天（P0 必须上线，P1 / P2 视时间而定）
 
@@ -32,7 +32,7 @@
 | | 通过现有 CI/CD 部署到 Azure | NF-7 |
 | **P1 尽量上线** | 演示数据脚本 | DM-* |
 | | AI 每周总结 | WS-* |
-| **P2 有时间再做** | 再加 2 个工具 | T-4、T-5 |
+| **P2 有时间再做** | 再加 2 个工具 + 话题按钮（对话模式） | T-4、T-5、CM-* |
 | **不在范围内** | 👍/👎 反馈、Langfuse 链路追踪、对话历史存数据库、自然语言记录运动、会修改数据的工具、应用内的管理或监测界面 | — |
 
 ## 3. 关键决策
@@ -51,6 +51,7 @@
 | D-10 | **语言**：对话跟随用户输入；每周总结跟随浏览器语言 | 每周总结没有用户输入可以参考，所以由前端传入 `navigator.language`。 |
 | D-11 | **模型：`deepseek-flash`，并关闭思考模式**（`"thinking": { "type": "disabled" }`） | 思考模式默认开启。在思考模式下，只要请求带了 `tools`，就必须回传之前每一轮的 `reasoning_content`（包括跨用户提问的轮次），否则 API 返回 400。这和 D-7（前端只保存文字）冲突；而且额外的 token 会增加从 Azure 澳大利亚到 DeepSeek 的延迟。查几个数字再总结一下，不需要深度推理。 |
 | D-12 | **客户端：自己写一个轻量的 `HttpClient` 封装，调用 DeepSeek 的 OpenAI 格式接口 `/chat/completions`**，不用第三方 SDK | 需要发送 DeepSeek 特有的字段（`thinking`），OpenAI 的 .NET SDK 不支持。大约 150 行代码就能完全控制请求内容、SSE 解析、工具调用的增量拼接和 `usage`。它位于 `IChatModel` 后面（D-3），以后换成 SDK 只需要改这一处。 |
+| D-13 | **话题按钮是模式，而不是预设问题**：每个按钮发送 `mode`，后端据此加上话题说明并缩小工具范围（§5.3） | 像 AI 产品里的"工具"按钮一样方便用户发现功能，同时减少模型选错工具的机会。按钮绝不绕过模型直接调用接口，否则只是和现有按钮重复。 |
 
 ## 4. 架构
 
@@ -105,6 +106,41 @@
 | WS-5 | 没有数据就不调用模型 | 上周没有运动记录时（包括新用户），返回固定的鼓励文案，`source: "fallback"` |
 | WS-6 | 出错时正常降级 | 模型出错时卡片显示"暂时无法生成总结"；Dashboard 照常加载 |
 
+实现说明（`backend/Services/Ai/WeeklySummaryService.cs`、`frontend/src/components/WeeklySummaryCard.tsx`）：
+- 支持的语言是一个白名单：`en` 和 `zh`（`zh-CN`、`zh_TW` 都归为 `zh`），其他语言一律按 `en` 处理。这样每周缓存的版本数和模型调用次数都有上限。
+- 发给模型的统计数据：`weekStart`、`weekEnd`、`workoutCount`、`activeDays`、`totalCalories`、`weeklyCalorieGoal`、`goalPercent`、`previousWeekCalories`、`checkInDays`、`byType`。不包含名字和备注（D-4）。
+- 只有真正调用模型时才写入一条 `AiUsageLog`（`weekly_summary`）；命中缓存和返回固定文案时不记录。模型失败时返回 `503`，并记为失败。
+- 并发请求导致重复插入时（唯一索引），会捕获异常并返回已保存的那一份。
+- 卡片放在 Dashboard 四宫格上方，单独占一整行；带有"AI summary"标签（固定文案时不显示），出错时有重试按钮。
+- 真实 DeepSeek 验证（2026-10-07，本地）：英文和中文的数字都正确；命中缓存约 6 毫秒；新用户返回固定文案，没有调用模型。第一次生成中文时，模型把时间说成了"本周"，提示词现在明确要求称为"上周"，之后连续生成 3 次都正确。
+
+### 5.3 话题按钮 / 对话模式（P2）
+
+**用户故事：** 作为用户，我希望输入框上方有一排可以一键点击的话题（"排行""运动建议"……），这样不用自己组织问题，就能知道助手能做什么，并得到有针对性的回答。
+
+| 编号 | 需求 | 验收标准 |
+|---|---|---|
+| CM-1 | 输入框上方的按钮：📊 Weekly review、💡 Workout advice、🏆 Rank、🪙 Points、🎯 Goal | 一直显示（不只在对话为空时）；屏幕窄时可以横向滚动；取代原来的推荐问题（CA-2） |
+| CM-2 | 点击按钮选中这个模式；再点一次取消 | 选中的按钮高亮（`aria-pressed`）并显示 ×；后续追问时保持选中 |
+| CM-3 | 选中模式后，输入框为空也能发送 | 发送这个按钮的默认问题；输入了文字时发送输入的文字 |
+| CM-4 | 请求里带上 `mode`；后端给系统提示词加上这个话题的说明，并缩小工具范围 | 例如 `rank` 只开放 T-4；不存在的模式返回 `400` |
+| CM-5 | 带模式发送的用户消息，气泡上显示一个小标签 | |
+| CM-6 | 运动建议只给一般性的健身建议 | 提到疼痛、受伤或身体状况时，建议咨询专业人士，不给建议 |
+
+模式（`backend/Services/Ai/ChatModes.cs`）和对应的工具：
+
+| 模式 | 工具 | 默认问题（前端） |
+|---|---|---|
+| `review` | T-1、T-3、T-2 | How is my week going? |
+| `advice` | T-1、T-3 | Based on my recent workouts, what should I do next? |
+| `rank` | T-4 | Where do I stand on the leaderboards? |
+| `points` | T-5 | Summarize my points and any unclaimed rewards. |
+| `goal` | T-3、T-1 | How close am I to my weekly goal? |
+
+不选模式、直接打字提问时，仍然可以使用全部 5 个工具。
+
+真实 DeepSeek 验证（2026-10-07，本地，演示账号）：每个模式的数字都正确；`rank` 和 `points` 只调用了各自的工具；在运动建议模式下问"跑步时膝盖疼怎么办"，没有调用工具，并建议看医生或理疗师；`rank` 没有提到任何其他用户；`mode: "hack"` 返回 400。
+
 ## 6. 工具
 
 所有工具都是**只读的**，**不接受 `userId`**（D-5），**只返回统计数据**（D-4）。后端判断"今天"时，使用和现有 Controller 一样的 `ResolveToday` 限制逻辑。
@@ -114,15 +150,15 @@
 | T-1 | P0 | `get_workout_summary` | `range`：`"this_week"` \| `"last_week"` \| `"this_month"` \| `"last_month"` | `{ range, from, to, workoutCount, activeDays, totalCalories, byType: { Running: { count, calories }, … } }` |
 | T-2 | P0 | `get_checkin_status` | — | `{ streak, checkedInToday, rewardSkinStreak, ownsRewardSkin, checkInsUntilRewardSkin }` |
 | T-3 | P0 | `get_weekly_goal_progress` | — | `{ weekStart, goal, caloriesSoFar, remainingCalories, percent, daysLeftInWeek }` |
-| T-4 | P2 | `get_rank` | — | `{ rank, totalUsers, points }`（不包含其他用户的名字） |
-| T-5 | P2 | `get_points_summary` | — | `{ balance, earnedLast7Days, recentSources: [{ reason, amount, date }] }` |
+| T-4 | P2 ✅ | `get_rank` | — | `{ totalUsers, leaderboardShowsTop, points/streak/caloriesToday: { rank, value, behindNextRank }, earliestCheckInToday: { rank, checkedInToday, usersCheckedInToday } }`，排序规则和 `LeaderboardController` 一致（包括使用存储的 `Streak`）；只返回自己的位置 |
+| T-5 | P2 ✅ | `get_points_summary` | — | `{ balance, earnedLast7Days, spentLast7Days, unclaimedToday: { checkIn, workout, total }, recentTransactions: [{ reason, amount, date }] }`，未领取奖励的判断规则和 `RewardsController.GetToday` 一致 |
 
 工具名称不存在或参数无效时，不抛出异常，而是把 `{ "error": "..." }` 作为工具结果返回，让模型自己处理。
 
 实现说明（`backend/Services/Ai/ChatToolExecutor.cs`）：
 - `ExecuteAsync(userId, today, call)`：`userId` 由 Controller 从 JWT 中取出传入；模型的参数只会读取 `range`，所以即使被注入了 `"userId": 2` 也会被忽略（有测试覆盖）。
 - 一周从**周一**开始，和前端的 `WeeklyGoalDonut` 一致。
-- **T-2 的连续签到天数：** `User.Streak` 只在下次签到时才重新计算，所以中断几天后它还保留着旧值。工具只有在最后一次签到是今天或昨天时才返回这个值，否则返回 `streak = 0`。奖励皮肤所需的天数来自 `CheckInController.RewardSkinStreak`（原来是写死的 `7`，现在提成了常量），保证工具和签到逻辑使用同一个值。
+- **T-2 的连续签到天数：** `User.Streak` 只在下次签到时才重新计算，所以中断几天后它还保留着旧值。工具只有在最近一次签到（`CheckIns.Date`，本地日期）是今天或昨天时才返回这个值，否则返回 `streak = 0`。奖励皮肤所需的天数来自 `CheckInController.RewardSkinStreak`（原来是写死的 `7`，现在提成了常量），保证工具和签到逻辑使用同一个值。
 
 ## 7. API
 
@@ -132,7 +168,7 @@
 
 请求：
 ```json
-{ "history": [{ "role": "user", "text": "..." }, { "role": "assistant", "text": "..." }], "message": "How did I do this week?" }
+{ "history": [{ "role": "user", "text": "..." }, { "role": "assistant", "text": "..." }], "message": "How did I do this week?", "mode": "review" }
 ```
 
 响应：`Content-Type: text/event-stream`，每个 `data:` 行是一个 JSON 对象：
@@ -146,7 +182,7 @@
 
 开始流式输出之前：今日额度用完时返回 `429` 和 `{ "message": "..." }`；`message` 为空或超过 1000 个字符时返回 `400`。
 
-流式输出开始后发生的错误（模型失败、超时）会以 `error` 事件的形式出现在 `200` 响应里，因为响应头已经发出去了。和其他接口一样传入 `?localDate=YYYY-MM-DD`，服务器会用 `ResolveToday` 做限制。历史记录里角色不是 `assistant` 的轮次一律当作 `user` 处理，前端无法注入系统消息。
+流式输出开始后发生的错误（模型失败、超时）会以 `error` 事件的形式出现在 `200` 响应里，因为响应头已经发出去了。`mode` 是可选的（§5.3），值不存在时返回 `400`。和其他接口一样传入 `?localDate=YYYY-MM-DD`，服务器会用 `ResolveToday` 做限制。历史记录里角色不是 `assistant` 的轮次一律当作 `user` 处理，前端无法注入系统消息。
 
 前端必须用 `fetch` + `ReadableStream` 读取，不能用 `EventSource`，因为它不能发送 POST 请求体，也不能带 `Authorization` 请求头。
 
@@ -208,9 +244,9 @@
 中文翻译：你是 HealthTrack 助手，帮助已登录的用户了解他们在这个应用里的运动、签到、连续签到和目标情况。只要回答依赖用户的数据，就先调用相应的工具，追问也不例外，即使之前的消息里提到过数字，因为数据可能已经变化，之前的回答也可能不完整。绝不猜测或编造数字。直接调用工具，不要预告你要去查数据。用用户最近一条消息的语言回复。回答要简短、带鼓励性。只讨论健身和这个应用，其他话题礼貌拒绝。不诊断疾病；涉及健康问题时，建议咨询专业人士。
 
 **每周总结的系统提示词：**
-> You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's week from the JSON stats provided. Use only the numbers given; never invent data. End with one concrete, achievable suggestion for next week. Write in {language}. No medical advice.
+> You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's previous week (the Monday–Sunday range in the JSON stats provided). The user reads this during the following week, so always call it "last week" (never "this week"). Use only the numbers given; never invent data. End with one concrete, achievable suggestion for next week. Write in {language}. No medical advice. Plain text only — no Markdown, headings or lists.
 
-中文翻译：你是一位善于鼓励的健身教练。根据提供的 JSON 统计数据，写 3 到 4 句话总结用户这一周的情况。只使用给出的数字，绝不编造数据。最后给出一条具体、可以做到的下周建议。用 {language} 书写。不提供医疗建议。
+中文翻译：你是一位善于鼓励的健身教练。根据提供的 JSON 统计数据（其中周一到周日的日期范围），写 3 到 4 句话总结用户上一周的情况。用户会在下一周看到这段话，所以始终称为"上周"，不要说"本周"。只使用给出的数字，绝不编造数据。最后给出一条具体、可以做到的下周建议。用 {language} 书写。不提供医疗建议。只输出纯文本，不要 Markdown、标题或列表。
 
 ## 10. 非功能需求
 
@@ -231,7 +267,11 @@
 |---|---|
 | DM-1 | `software/scripts/seed-demo.sql` 为指定的 `UserId` 插入大约 4 周、类型多样的运动和签到记录 |
 | DM-2 | 包含一个完整的"上周"，让每周总结有内容；当前连续签到 5 天，用来演示"还差 2 天拿到奖励皮肤" |
-| DM-3 | 用法：先在界面上注册一个演示账号，查出它的 `Id`，再到 Neon 的 SQL 控制台运行脚本。应用里不提供生成数据的接口 |
+| DM-3 | 用法：在网站上注册一个用户名以 `demo` 开头的演示账号，在脚本开头设置 `demo_username`（和 `local_tz`），再到 Neon 的 SQL Editor 运行。应用里不提供生成数据的接口 |
+
+实现说明（`software/scripts/seed-demo.sql`）：整个脚本是一个 `DO` 代码块；按用户名查找用户，用户名不以 `demo` 开头就拒绝执行，避免误改真实账号的数据。可以重复运行：每次都会替换该用户最近 35 天（不含今天）的运动和签到记录。日期都相对于用户本地的"今天"（`local_tz`）计算，所以任何时候运行都能用。本地已验证：两个安全检查都会生效；生成数据后，AI 回答上周 1870 千卡 / 5 次运动，连续签到 5 天、还差 2 次拿到奖励皮肤，本周 740 / 2000（37%）。
+
+**写脚本时发现的原有 bug，已修复（2026-10-07）：** `User.LastCheckIn` 以 UTC 存储，但 `CheckInController` 原来拿它的 **UTC** 日期和用户**本地**的"昨天"比较。在新西兰（UTC+12/13），上午签到时的 UTC 日期是前一天，所以第二天上午再签到时，连续签到会被重置成 1（反过来，已经中断的连续签到也可能被错误地延续）。现在 `CheckInController` 和 T-2 都改为根据 `CheckIns.Date`（本身就是用户的本地日期）判断，`LastCheckIn` 不再参与任何日期判断。测试见 `Tests/Controllers/CheckInStreakTests.cs`（3 个测试，修复前两个方向的错误都复现了）。
 
 ## 12. 待确认事项
 
@@ -289,15 +329,16 @@
 - [x] 在本地验证真实的 DeepSeek 调用，见 [冒烟测试](#真实-deepseek-冒烟测试2026-10-07本地)
 - [x] 前端 `ChatWidget`：对话面板、推荐问题、流式显示、工具运行提示、剩余次数、错误处理（11 个测试：SSE 解析器 4 个 + 组件 7 个）
 - [x] 在浏览器里手动检查界面（桌面和手机宽度），包括 CA-1 的按钮遮挡问题
-- [ ] Azure 配置 Secret `DeepSeek__ApiKey`；push；CI/CD 通过；在线上做冒烟测试
+- [x] Azure 配置 Secret `DeepSeek__ApiKey`；push；CI/CD 通过；在线上做冒烟测试
 
 **P1**
-- [ ] `seed-demo.sql` + 演示账号
-- [ ] `WeeklySummary` 实体 + 迁移 + 服务 + 接口 + 无数据时的固定文案 + 测试
-- [ ] Dashboard 的 `WeeklySummaryCard`
+- [x] `seed-demo.sql`（本地已验证）；线上的演示账号还需要开发者自己注册并运行脚本
+- [x] `WeeklySummary` 实体 + 迁移 + 服务 + 接口 + 无数据时的固定文案 + 测试（后端 14 个测试）
+- [x] Dashboard 的 `WeeklySummaryCard`（前端 3 个测试）
 
 **P2**
-- [ ] T-4 `get_rank`、T-5 `get_points_summary`
+- [x] T-4 `get_rank`、T-5 `get_points_summary`（3 个测试）
+- [x] 话题按钮 / 对话模式（§5.3）：`ChatModes`、`POST /api/ai/chat` 的 `mode` 参数、`ChatWidget` 里的按钮（后端 4 个测试，组件测试已重写）
 
 ## 13. 变更记录
 
@@ -313,3 +354,8 @@
 | 2026-10-06 | P0 第 5 步：`ChatAssistantService`（Agent 循环，最多调用 5 次模型，历史最多 20 轮并过滤掉 system 角色）+ `POST /api/ai/chat` SSE 接口；P0 后端完成 |
 | 2026-10-07 | 真实 DeepSeek 冒烟测试；对话提示词改为：只要回答依赖用户数据就必须调用工具（修复追问时编造数据的问题），并且不鼓励调用工具前的预告；Agent 循环在两轮之间插入空行 |
 | 2026-10-07 | P0 第 6 步：`ChatWidget` + `streamChat`（fetch + `ReadableStream`）+ 增量 SSE 解析器；用 `react-markdown` 渲染回复 |
+| 2026-10-07 | P0 已部署（`45fce57`）：CI 和 Deploy 通过，在线上界面验证了对话功能（工具回答、拒绝无关问题、额度） |
+| 2026-10-07 | P1 演示数据：`software/scripts/seed-demo.sql`（按用户名查找，有 `demo` 前缀检查，按本地时区计算日期，可重复运行）；记录了原有的"UTC 和本地日期比较"导致连续签到中断的问题 |
+| 2026-10-07 | 修复原有的连续签到 bug：`CheckInController` 和 T-2 改为根据 `CheckIns.Date`（本地日期）判断是否连续，不再用 `LastCheckIn` 的 UTC 日期；演示脚本不再需要"固定在 UTC 中午"的特殊处理 |
+| 2026-10-07 | P1 每周总结：`WeeklySummary` 表 + 迁移、`WeeklySummaryService`、`GET /api/ai/weekly-summary`、Dashboard 卡片；语言白名单 `en`/`zh`；用真实模型验证后，提示词明确要求称为"上周" |
+| 2026-10-07 | P2：T-4 `get_rank`、T-5 `get_points_summary`；话题按钮作为对话模式（§5.3、D-13），取代原来的推荐问题 |

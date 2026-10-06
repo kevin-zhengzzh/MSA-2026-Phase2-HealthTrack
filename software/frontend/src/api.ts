@@ -1,4 +1,4 @@
-import type { AuthResponse, CaloriesLeaderboardEntry, ChatQuota, ChatStreamEvent, ChatTurn, CheckIn, CheckinTodayLeaderboardEntry, CheckInResult, LeaderboardEntry, PointTransaction, RewardStatus, Skin, StreakLeaderboardEntry, User, WorkoutRecord, WorkoutSubmitResult } from './types'
+import type { AuthResponse, CaloriesLeaderboardEntry, ChatQuota, ChatStreamEvent, ChatTurn, CheckIn, CheckinTodayLeaderboardEntry, CheckInResult, LeaderboardEntry, PointTransaction, RewardStatus, Skin, StreakLeaderboardEntry, User, WeeklySummary, WorkoutRecord, WorkoutSubmitResult } from './types'
 import { useStore } from './store'
 import { createSseParser } from './sse'
 
@@ -194,6 +194,10 @@ export const updateWorkout = (id: number, workoutType: string, calories: number)
 export const deleteWorkout = (id: number) =>
   request<void>(`/workout/${id}`, { method: 'DELETE' })
 
+// AI weekly summary of the last complete week, in the browser's language
+export const getWeeklySummary = () =>
+  request<WeeklySummary>(`/ai/weekly-summary?lang=${encodeURIComponent(navigator.language)}&localDate=${localDateStr()}`)
+
 // AI chat assistant
 export const getChatQuota = () => request<ChatQuota>('/ai/chat/quota')
 
@@ -205,6 +209,7 @@ export const getChatQuota = () => request<ChatQuota>('/ai/chat/quota')
 export async function streamChat(
   history: ChatTurn[],
   message: string,
+  mode: string | null,
   onEvent: (event: ChatStreamEvent) => void,
   signal?: AbortSignal,
 ) {
@@ -212,7 +217,7 @@ export async function streamChat(
   const res = await fetch(`${BASE}/ai/chat?localDate=${localDateStr()}`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ history, message }),
+    body: JSON.stringify({ history, message, mode }),
     signal,
   })
   if (!res.ok || !res.body) {

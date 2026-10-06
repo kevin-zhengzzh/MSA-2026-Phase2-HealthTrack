@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace backend.Services.Ai;
 
-// Runs the chat assistant's tools (spec §6). Every tool is read-only, scoped to
+// Runs the chat assistant's tools (spec §6, T-1..T-5). Every tool is read-only, scoped to
 // the userId passed in by the controller from the JWT — the model only supplies
 // a tool name and arguments, never whose data to read (D-5) — and returns
 // aggregates only (D-4). Failures come back as {"error": ...} tool results
@@ -15,6 +15,11 @@ public class ChatToolExecutor
     public const string WorkoutSummary = "get_workout_summary";
     public const string CheckInStatus = "get_checkin_status";
     public const string WeeklyGoalProgress = "get_weekly_goal_progress";
+    public const string Rank = "get_rank";
+    public const string PointsSummary = "get_points_summary";
+
+    // Matches the Rank page, which lists the top 50 of each board
+    private const int LeaderboardSize = 50;
 
     private static readonly string[] Ranges = ["this_week", "last_week", "this_month", "last_month"];
 
@@ -35,7 +40,17 @@ public class ChatToolExecutor
         new(WeeklyGoalProgress,
             "Get the user's progress toward their weekly calorie goal for the current Monday–Sunday week.",
             Schema(new { type = "object", properties = new { }, additionalProperties = false })),
+        new(Rank,
+            $"Get the user's position on each leaderboard (points, check-in streak, calories burned today, earliest check-in today) and the gap to the next rank up. The Rank page shows the top {LeaderboardSize}.",
+            Schema(new { type = "object", properties = new { }, additionalProperties = false })),
+        new(PointsSummary,
+            "Get the user's points balance, points earned and spent in the last 7 days, the most recent point transactions, and today's rewards that haven't been claimed yet.",
+            Schema(new { type = "object", properties = new { }, additionalProperties = false })),
     ];
+
+    // The subset a chat mode allows (spec §5.3); null means every tool
+    public static IReadOnlyList<ChatToolDefinition> DefinitionsFor(IReadOnlyList<string>? toolNames) =>
+        toolNames is null ? Definitions : Definitions.Where(d => toolNames.Contains(d.Name)).ToList();
 
     private readonly AppDbContext _db;
     private readonly AiUsageTracker _tracker;
@@ -67,6 +82,8 @@ public class ChatToolExecutor
             WorkoutSummary => await GetWorkoutSummary(userId, today, args, ct),
             CheckInStatus => await GetCheckInStatus(userId, today, ct),
             WeeklyGoalProgress => await GetWeeklyGoalProgress(userId, today, ct),
+            Rank => await GetRank(userId, today, ct),
+            PointsSummary => await GetPointsSummary(userId, today, ct),
             _ => new { error = $"Unknown tool: {call.Name}" },
         };
         return JsonSerializer.Serialize(result, JsonSerializerOptions.Web);
@@ -105,21 +122,20 @@ public class ChatToolExecutor
     // T-2
     private async Task<object> GetCheckInStatus(int userId, DateOnly today, CancellationToken ct)
     {
-        var user = await _db.Users
-            .Where(u => u.Id == userId)
-            .Select(u => new { u.Streak, u.LastCheckIn })
-            .FirstOrDefaultAsync(ct);
-        if (user is null) return new { error = "User not found." };
+        var storedStreak = await _db.Users.Where(u => u.Id == userId).Select(u => (int?)u.Streak).FirstOrDefaultAsync(ct);
+        if (storedStreak is null) return new { error = "User not found." };
 
+        var lastCheckInDate = await _db.CheckIns
+            .Where(c => c.UserId == userId)
+            .MaxAsync(c => (DateOnly?)c.Date, ct);
         var checkedInToday = await _db.CheckIns.AnyAsync(c => c.UserId == userId && c.Date == today, ct);
         var ownsRewardSkin = await _db.UserSkins.AnyAsync(us => us.UserId == userId && us.Skin.IsReward, ct);
 
         // User.Streak is only recalculated on the next check-in, so after missed
-        // days it still holds the old run. Treat it as broken unless the last
-        // check-in was today or yesterday (same date comparison as CheckInController).
-        var lastDate = user.LastCheckIn.HasValue ? DateOnly.FromDateTime(user.LastCheckIn.Value) : (DateOnly?)null;
-        var streakAlive = lastDate.HasValue && lastDate.Value >= today.AddDays(-1);
-        var streak = streakAlive ? user.Streak : 0;
+        // days it still holds the old run. Treat it as broken unless the latest
+        // check-in (a local date, same rule as CheckInController) is today or yesterday.
+        var streakAlive = lastCheckInDate >= today.AddDays(-1);
+        var streak = streakAlive ? storedStreak.Value : 0;
 
         return new
         {
@@ -150,6 +166,105 @@ public class ChatToolExecutor
             remainingCalories = Math.Max(0, goal.Value - caloriesSoFar),
             percent = goal.Value > 0 ? (int)Math.Round(caloriesSoFar * 100.0 / goal.Value) : 0,
             daysLeftInWeek = 6 - DaysSinceMonday(today),
+        };
+    }
+
+    // T-4. Same orderings as LeaderboardController (value desc, then Id asc) so
+    // the answer matches the Rank page — including its use of the stored Streak.
+    // Only the user's own rank and gaps are returned, never other users (D-4).
+    private async Task<object> GetRank(int userId, DateOnly today, CancellationToken ct)
+    {
+        var users = await _db.Users
+            .Select(u => new
+            {
+                u.Id,
+                u.Points,
+                u.Streak,
+                CaloriesToday = u.WorkoutRecords.Where(w => w.Date == today).Sum(w => (int?)w.Calories) ?? 0,
+            })
+            .ToListAsync(ct);
+        if (users.All(u => u.Id != userId)) return new { error = "User not found." };
+
+        var checkInOrder = await _db.CheckIns
+            .Where(c => c.Date == today)
+            .OrderBy(c => c.CreatedAt)
+            .Select(c => c.UserId)
+            .ToListAsync(ct);
+        var checkInIndex = checkInOrder.IndexOf(userId);
+
+        return new
+        {
+            totalUsers = users.Count,
+            leaderboardShowsTop = LeaderboardSize,
+            points = Position(users.Select(u => (u.Id, u.Points)), userId),
+            streak = Position(users.Select(u => (u.Id, u.Streak)), userId),
+            caloriesToday = Position(users.Select(u => (u.Id, u.CaloriesToday)), userId),
+            earliestCheckInToday = new
+            {
+                rank = checkInIndex >= 0 ? checkInIndex + 1 : (int?)null,
+                checkedInToday = checkInIndex >= 0,
+                usersCheckedInToday = checkInOrder.Count,
+            },
+        };
+    }
+
+    private static object Position(IEnumerable<(int Id, int Value)> rows, int userId)
+    {
+        var ordered = rows.OrderByDescending(r => r.Value).ThenBy(r => r.Id).ToList();
+        var index = ordered.FindIndex(r => r.Id == userId);
+        return new
+        {
+            rank = index + 1,
+            value = ordered[index].Value,
+            // How much more the user needs to draw level with the person one place up
+            behindNextRank = index == 0 ? (int?)null : ordered[index - 1].Value - ordered[index].Value,
+        };
+    }
+
+    // T-5. Unclaimed rewards use the same rule as RewardsController.GetToday.
+    private async Task<object> GetPointsSummary(int userId, DateOnly today, CancellationToken ct)
+    {
+        var balance = await _db.Users.Where(u => u.Id == userId).Select(u => (int?)u.Points).FirstOrDefaultAsync(ct);
+        if (balance is null) return new { error = "User not found." };
+
+        // Transactions are UTC instants; a 7-day window starting at UTC midnight
+        // is close enough for a summary
+        var since = today.AddDays(-6).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        var lastWeek = await _db.PointTransactions
+            .Where(p => p.UserId == userId && p.CreatedAt >= since)
+            .Select(p => p.Amount)
+            .ToListAsync(ct);
+        var recent = await _db.PointTransactions
+            .Where(p => p.UserId == userId)
+            .OrderByDescending(p => p.CreatedAt)
+            .Take(5)
+            .Select(p => new { p.Reason, p.Amount, p.CreatedAt })
+            .ToListAsync(ct);
+
+        var unclaimedCheckIn = await _db.CheckIns
+            .Where(c => c.UserId == userId && c.Date == today && !c.Claimed && c.PointsEarned > 0)
+            .SumAsync(c => c.PointsEarned, ct);
+        var unclaimedWorkout = await _db.WorkoutRecords
+            .Where(w => w.UserId == userId && w.Date == today && !w.Claimed && w.PointsEarned > 0)
+            .SumAsync(w => w.PointsEarned, ct);
+
+        return new
+        {
+            balance = balance.Value,
+            earnedLast7Days = lastWeek.Where(a => a > 0).Sum(),
+            spentLast7Days = -lastWeek.Where(a => a < 0).Sum(),
+            unclaimedToday = new
+            {
+                checkIn = unclaimedCheckIn,
+                workout = unclaimedWorkout,
+                total = unclaimedCheckIn + unclaimedWorkout,
+            },
+            recentTransactions = recent.Select(p => new
+            {
+                reason = p.Reason,
+                amount = p.Amount,
+                date = DateOnly.FromDateTime(p.CreatedAt),
+            }),
         };
     }
 
