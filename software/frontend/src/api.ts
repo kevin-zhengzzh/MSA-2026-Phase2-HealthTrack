@@ -194,9 +194,9 @@ export const updateWorkout = (id: number, workoutType: string, calories: number)
 export const deleteWorkout = (id: number) =>
   request<void>(`/workout/${id}`, { method: 'DELETE' })
 
-// AI weekly summary of the last complete week, in the browser's language
+// AI weekly summary of the last complete week
 export const getWeeklySummary = () =>
-  request<WeeklySummary>(`/ai/weekly-summary?lang=${encodeURIComponent(navigator.language)}&localDate=${localDateStr()}`)
+  request<WeeklySummary>(`/ai/weekly-summary?localDate=${localDateStr()}`)
 
 // AI chat assistant
 export const getChatQuota = () => request<ChatQuota>('/ai/chat/quota')

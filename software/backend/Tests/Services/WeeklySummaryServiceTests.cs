@@ -54,7 +54,7 @@ public class WeeklySummaryServiceTests
         var model = new FakeChatModel();   // throws if called
         var service = new WeeklySummaryService(NewDb(), model);
 
-        var result = await service.GetAsync(Me, Today, "en-NZ");
+        var result = await service.GetAsync(Me, Today);
 
         Assert.Equal(WeeklySummaryService.SourceFallback, result.Source);
         Assert.Equal(LastMonday, result.WeekStart);
@@ -68,7 +68,7 @@ public class WeeklySummaryServiceTests
         var model = new FakeChatModel().Returns(FakeChatModel.Text("Great week!"));
         var service = new WeeklySummaryService(DbWithLastWeekWorkouts(), model);
 
-        var result = await service.GetAsync(Me, Today, "en-US");
+        var result = await service.GetAsync(Me, Today);
 
         Assert.Equal(WeeklySummaryService.SourceAi, result.Source);
         Assert.Equal("Great week!", result.Summary);
@@ -95,8 +95,8 @@ public class WeeklySummaryServiceTests
         var db = DbWithLastWeekWorkouts();
         var model = new FakeChatModel().Returns(FakeChatModel.Text("Great week!"));
 
-        await new WeeklySummaryService(db, model).GetAsync(Me, Today, "en");
-        var second = await new WeeklySummaryService(db, model).GetAsync(Me, Today.AddDays(2), "en-GB");
+        await new WeeklySummaryService(db, model).GetAsync(Me, Today);
+        var second = await new WeeklySummaryService(db, model).GetAsync(Me, Today.AddDays(2));
 
         Assert.Equal(WeeklySummaryService.SourceCache, second.Source);
         Assert.Equal("Great week!", second.Summary);
@@ -104,44 +104,8 @@ public class WeeklySummaryServiceTests
         Assert.Single(db.WeeklySummaries);
     }
 
-    [Fact]
-    public async Task EachLanguageIsGeneratedAndCachedSeparately()
-    {
-        var db = DbWithLastWeekWorkouts();
-        var model = new FakeChatModel()
-            .Returns(FakeChatModel.Text("Great week!"))
-            .Returns(FakeChatModel.Text("这周很棒！"));
-        var service = new WeeklySummaryService(db, model);
 
-        await service.GetAsync(Me, Today, "en");
-        var zh = await service.GetAsync(Me, Today, "zh-CN");
 
-        Assert.Equal("这周很棒！", zh.Summary);
-        Assert.Contains("Write in Simplified Chinese", model.Requests[1].Messages[0].Content);
-        Assert.Equal(2, db.WeeklySummaries.Count());
-    }
-
-    [Theory]
-    [InlineData("zh-CN", "zh")]
-    [InlineData("zh_TW", "zh")]
-    [InlineData("ZH", "zh")]
-    [InlineData("en-NZ", "en")]
-    [InlineData("fr-FR", "en")]
-    [InlineData("", "en")]
-    [InlineData(null, "en")]
-    public void NormalizeLanguage_MapsToSupportedLanguagesOnly(string? input, string expected)
-    {
-        Assert.Equal(expected, WeeklySummaryService.NormalizeLanguage(input));
-    }
-
-    [Fact]
-    public async Task ChineseFallbackWhenNoWorkouts()
-    {
-        var result = await new WeeklySummaryService(NewDb(), new FakeChatModel()).GetAsync(Me, Today, "zh-CN");
-
-        Assert.Equal(WeeklySummaryService.SourceFallback, result.Source);
-        Assert.Contains("上周", result.Summary);
-    }
 
     [Fact]
     public async Task ModelFailure_PropagatesAndCachesNothing()
@@ -149,7 +113,7 @@ public class WeeklySummaryServiceTests
         var db = DbWithLastWeekWorkouts();
         var model = new FakeChatModel().Throws(new ChatModelException("DeepSeek returned 503", 503));
 
-        await Assert.ThrowsAsync<ChatModelException>(() => new WeeklySummaryService(db, model).GetAsync(Me, Today, "en"));
+        await Assert.ThrowsAsync<ChatModelException>(() => new WeeklySummaryService(db, model).GetAsync(Me, Today));
 
         Assert.Empty(db.WeeklySummaries);
     }
@@ -160,7 +124,7 @@ public class WeeklySummaryServiceTests
         var db = DbWithLastWeekWorkouts();
         var model = new FakeChatModel().Returns(FakeChatModel.Text("   "));
 
-        await Assert.ThrowsAsync<ChatModelException>(() => new WeeklySummaryService(db, model).GetAsync(Me, Today, "en"));
+        await Assert.ThrowsAsync<ChatModelException>(() => new WeeklySummaryService(db, model).GetAsync(Me, Today));
 
         Assert.Empty(db.WeeklySummaries);
     }

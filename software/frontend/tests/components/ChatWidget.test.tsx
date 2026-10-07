@@ -39,7 +39,7 @@ describe('ChatWidget', () => {
     await openWidget()
 
     expect(screen.getByRole('dialog', { name: 'HealthTrack assistant' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Rank/ })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: /Rank/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Workout advice/ })).toBeInTheDocument()
     expect(await screen.findByText('28 / 30 messages left today')).toBeInTheDocument()
   })
@@ -61,19 +61,17 @@ describe('ChatWidget', () => {
     expect(screen.getByText('27 / 30 messages left today')).toBeInTheDocument()
   })
 
-  it('a selected pill sends its default prompt with the mode, and stays selected for follow-ups', async () => {
+  it('one click on a pill sends its prompt with the mode; the next typed message has no mode', async () => {
     streams({ type: 'text', text: "You're #2 on points." }, { type: 'done', remaining: 27 })
     streams({ type: 'text', text: '30 points behind.' }, { type: 'done', remaining: 26 })
     const user = await openWidget()
 
     await user.click(screen.getByRole('button', { name: /Rank/ }))
-    expect(screen.getByRole('button', { name: /Rank/ })).toHaveAttribute('aria-pressed', 'true')
-    await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(streamChat).toHaveBeenLastCalledWith([], 'Where do I stand on the leaderboards?', 'rank', expect.any(Function), expect.any(AbortSignal))
     expect(await screen.findByText("You're #2 on points.")).toBeInTheDocument()
-    // The user bubble carries the topic badge
-    expect(screen.getAllByText('🏆 Rank').length).toBeGreaterThan(1)
+    // The user bubble carries the topic badge (the pill itself has the same label)
+    expect(screen.getAllByText('🏆 Rank').length).toBe(2)
 
     await user.type(messageBox(), 'How far behind am I?{Enter}')
 
@@ -83,20 +81,10 @@ describe('ChatWidget', () => {
         { role: 'assistant', text: "You're #2 on points." },
       ],
       'How far behind am I?',
-      'rank',
+      null,
       expect.any(Function),
       expect.any(AbortSignal),
     )
-  })
-
-  it('clicking the selected pill again clears the mode', async () => {
-    const user = await openWidget()
-
-    await user.click(screen.getByRole('button', { name: /Points/ }))
-    await user.click(screen.getByRole('button', { name: /Points/ }))
-
-    expect(screen.getByRole('button', { name: /Points/ })).toHaveAttribute('aria-pressed', 'false')
-    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
   })
 
   it('shows an error with Retry, and retrying resends with the same mode and no failed history', async () => {
@@ -105,7 +93,6 @@ describe('ChatWidget', () => {
     const user = await openWidget()
 
     await user.click(screen.getByRole('button', { name: /Goal/ }))
-    await user.click(screen.getByRole('button', { name: 'Send' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('unavailable right now')
 
     await user.click(screen.getByRole('button', { name: 'Retry' }))

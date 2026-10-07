@@ -2,7 +2,7 @@
 
 > 本文件是 [06-ai-features-spec.md](./06-ai-features-spec.md) 的中文版。两个版本需要同步修改；内容不一致时，以英文版为准。
 
-**状态：** P0 已上线（2026-10-07，commit `45fce57`）；P1 和 P2（演示数据、每周总结、T-4/T-5、话题按钮）已在本地完成，尚未部署
+**状态：** P0、P1、P2 均已上线（2026-10-07；P0 为 `45fce57`，P1 和 P2 为 `01ebacd`）。线上的演示账号还需要运行演示脚本。
 **创建日期：** 2026-10-06
 **截止时间：** 1 天（P0 必须上线，P1 / P2 视时间而定）
 
@@ -48,10 +48,10 @@
 | D-7 | **对话历史只保存在前端** | 刷新后清空。不需要新建表，对话内容也不会进数据库。前端发来的历史可以信任，因为不管历史怎么写，工具都只能查到 JWT 对应用户的数据。 |
 | D-8 | **不在应用内开放监测数据** | 应用没有管理员角色，任何监测接口都会对所有用户可见。用量在 Neon 控制台查询，日志在 Azure Log Stream 查看，花费在 DeepSeek 后台查看。 |
 | D-9 | **每周总结覆盖上一个完整的周** | 数据完整，每周只生成一次，缓存最简单，成本最低。 |
-| D-10 | **语言**：对话跟随用户输入；每周总结跟随浏览器语言 | 每周总结没有用户输入可以参考，所以由前端传入 `navigator.language`。 |
+| D-10 | **语言**：对话跟随用户输入；每周总结统一用英文 | 界面全部是英文。每周总结最初跟随浏览器语言，但在英文的 Dashboard 里出现一段中文显得不协调，所以改为只用英文（2026-10-07）。 |
 | D-11 | **模型：`deepseek-flash`，并关闭思考模式**（`"thinking": { "type": "disabled" }`） | 思考模式默认开启。在思考模式下，只要请求带了 `tools`，就必须回传之前每一轮的 `reasoning_content`（包括跨用户提问的轮次），否则 API 返回 400。这和 D-7（前端只保存文字）冲突；而且额外的 token 会增加从 Azure 澳大利亚到 DeepSeek 的延迟。查几个数字再总结一下，不需要深度推理。 |
 | D-12 | **客户端：自己写一个轻量的 `HttpClient` 封装，调用 DeepSeek 的 OpenAI 格式接口 `/chat/completions`**，不用第三方 SDK | 需要发送 DeepSeek 特有的字段（`thinking`），OpenAI 的 .NET SDK 不支持。大约 150 行代码就能完全控制请求内容、SSE 解析、工具调用的增量拼接和 `usage`。它位于 `IChatModel` 后面（D-3），以后换成 SDK 只需要改这一处。 |
-| D-13 | **话题按钮是模式，而不是预设问题**：每个按钮发送 `mode`，后端据此加上话题说明并缩小工具范围（§5.3） | 像 AI 产品里的"工具"按钮一样方便用户发现功能，同时减少模型选错工具的机会。按钮绝不绕过模型直接调用接口，否则只是和现有按钮重复。 |
+| D-13 | **话题按钮点一下就发送，并带上 `mode`**：模式为这一条消息加上话题说明并缩小工具范围（§5.3） | 一键得到回答，方便用户发现功能，同时减少模型选错工具的机会。最初做成了可以保持选中的模式，在界面上试用后改为点一下就发送。按钮绝不绕过模型直接调用接口，否则只是和现有按钮重复。 |
 
 ## 4. 架构
 
@@ -101,18 +101,18 @@
 |---|---|---|
 | WS-1 | Dashboard 卡片显示上一个完整周（周一到周日）的总结，3 到 4 句话 | 提到运动天数、总消耗、目标完成度；最后给一条建议 |
 | WS-2 | 统计数据由 C# 计算，模型只负责写文字 | 总结里的每个数字都和数据库一致（D-6） |
-| WS-3 | 语言跟随浏览器 | 前端传入 `lang`（来自 `navigator.language`） |
+| WS-3 | 统一用英文，和界面一致 | 不再发送语言参数 |
 | WS-4 | 按用户和周缓存 | 同一周第二次加载时不调用模型 |
 | WS-5 | 没有数据就不调用模型 | 上周没有运动记录时（包括新用户），返回固定的鼓励文案，`source: "fallback"` |
 | WS-6 | 出错时正常降级 | 模型出错时卡片显示"暂时无法生成总结"；Dashboard 照常加载 |
 
 实现说明（`backend/Services/Ai/WeeklySummaryService.cs`、`frontend/src/components/WeeklySummaryCard.tsx`）：
-- 支持的语言是一个白名单：`en` 和 `zh`（`zh-CN`、`zh_TW` 都归为 `zh`），其他语言一律按 `en` 处理。这样每周缓存的版本数和模型调用次数都有上限。
+- 只用英文（D-10）。`Language` 列仍然保留在表和唯一索引里，固定为 `"en"`，以后加多语言时不需要新的迁移。
 - 发给模型的统计数据：`weekStart`、`weekEnd`、`workoutCount`、`activeDays`、`totalCalories`、`weeklyCalorieGoal`、`goalPercent`、`previousWeekCalories`、`checkInDays`、`byType`。不包含名字和备注（D-4）。
 - 只有真正调用模型时才写入一条 `AiUsageLog`（`weekly_summary`）；命中缓存和返回固定文案时不记录。模型失败时返回 `503`，并记为失败。
 - 并发请求导致重复插入时（唯一索引），会捕获异常并返回已保存的那一份。
 - 卡片放在 Dashboard 四宫格上方，单独占一整行；带有"AI summary"标签（固定文案时不显示），出错时有重试按钮。
-- 真实 DeepSeek 验证（2026-10-07，本地）：英文和中文的数字都正确；命中缓存约 6 毫秒；新用户返回固定文案，没有调用模型。第一次生成中文时，模型把时间说成了"本周"，提示词现在明确要求称为"上周"，之后连续生成 3 次都正确。
+- 真实 DeepSeek 验证（2026-10-07，本地，当时还支持中文）：英文和中文的数字都正确；命中缓存约 6 毫秒；新用户返回固定文案，没有调用模型。第一次生成中文时，模型把时间说成了"本周"，提示词现在明确要求称为"上周"，之后连续生成 3 次都正确。
 
 ### 5.3 话题按钮 / 对话模式（P2）
 
@@ -121,8 +121,8 @@
 | 编号 | 需求 | 验收标准 |
 |---|---|---|
 | CM-1 | 输入框上方的按钮：📊 Weekly review、💡 Workout advice、🏆 Rank、🪙 Points、🎯 Goal | 一直显示（不只在对话为空时）；屏幕窄时可以横向滚动；取代原来的推荐问题（CA-2） |
-| CM-2 | 点击按钮选中这个模式；再点一次取消 | 选中的按钮高亮（`aria-pressed`）并显示 ×；后续追问时保持选中 |
-| CM-3 | 选中模式后，输入框为空也能发送 | 发送这个按钮的默认问题；输入了文字时发送输入的文字 |
+| CM-2 | 点一下按钮就立即发送它的默认问题，没有"选中"状态 | 回复生成期间按钮不可点 |
+| CM-3 | 模式只作用于这一条消息 | 自己输入的消息（包括点按钮之后的追问）不带 `mode`，可以使用所有工具 |
 | CM-4 | 请求里带上 `mode`；后端给系统提示词加上这个话题的说明，并缩小工具范围 | 例如 `rank` 只开放 T-4；不存在的模式返回 `400` |
 | CM-5 | 带模式发送的用户消息，气泡上显示一个小标签 | |
 | CM-6 | 运动建议只给一般性的健身建议 | 提到疼痛、受伤或身体状况时，建议咨询专业人士，不给建议 |
@@ -192,7 +192,7 @@
 { "used": 6, "limit": 30, "remaining": 24 }
 ```
 
-### `GET /api/ai/weekly-summary?lang=zh-CN&localDate=2026-10-06`（P1）
+### `GET /api/ai/weekly-summary?localDate=2026-10-06`（P1）
 
 ```json
 { "weekStart": "2026-09-28", "weekEnd": "2026-10-04", "summary": "...", "source": "ai" }
@@ -228,7 +228,7 @@
 | `Id` | int 主键 | |
 | `UserId` | int | `(UserId, WeekStart, Language)` 建唯一索引 |
 | `WeekStart` | DateOnly | 周一 |
-| `Language` | string | 规范化后的值，比如 `"zh"` / `"en"` |
+| `Language` | string | 目前固定为 `"en"`（D-10） |
 | `Content` | string | |
 | `CreatedAt` | DateTime（UTC） | |
 
@@ -244,9 +244,9 @@
 中文翻译：你是 HealthTrack 助手，帮助已登录的用户了解他们在这个应用里的运动、签到、连续签到和目标情况。只要回答依赖用户的数据，就先调用相应的工具，追问也不例外，即使之前的消息里提到过数字，因为数据可能已经变化，之前的回答也可能不完整。绝不猜测或编造数字。直接调用工具，不要预告你要去查数据。用用户最近一条消息的语言回复。回答要简短、带鼓励性。只讨论健身和这个应用，其他话题礼貌拒绝。不诊断疾病；涉及健康问题时，建议咨询专业人士。
 
 **每周总结的系统提示词：**
-> You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's previous week (the Monday–Sunday range in the JSON stats provided). The user reads this during the following week, so always call it "last week" (never "this week"). Use only the numbers given; never invent data. End with one concrete, achievable suggestion for next week. Write in {language}. No medical advice. Plain text only — no Markdown, headings or lists.
+> You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's previous week (the Monday–Sunday range in the JSON stats provided). The user reads this during the following week, so always call it "last week" (never "this week"). Use only the numbers given; never invent data. End with one concrete, achievable suggestion for next week. Write in English. No medical advice. Plain text only — no Markdown, headings or lists.
 
-中文翻译：你是一位善于鼓励的健身教练。根据提供的 JSON 统计数据（其中周一到周日的日期范围），写 3 到 4 句话总结用户上一周的情况。用户会在下一周看到这段话，所以始终称为"上周"，不要说"本周"。只使用给出的数字，绝不编造数据。最后给出一条具体、可以做到的下周建议。用 {language} 书写。不提供医疗建议。只输出纯文本，不要 Markdown、标题或列表。
+中文翻译：你是一位善于鼓励的健身教练。根据提供的 JSON 统计数据（其中周一到周日的日期范围），写 3 到 4 句话总结用户上一周的情况。用户会在下一周看到这段话，所以始终称为"上周"，不要说"本周"。只使用给出的数字，绝不编造数据。最后给出一条具体、可以做到的下周建议。用英文书写。不提供医疗建议。只输出纯文本，不要 Markdown、标题或列表。
 
 ## 10. 非功能需求
 
@@ -359,3 +359,6 @@
 | 2026-10-07 | 修复原有的连续签到 bug：`CheckInController` 和 T-2 改为根据 `CheckIns.Date`（本地日期）判断是否连续，不再用 `LastCheckIn` 的 UTC 日期；演示脚本不再需要"固定在 UTC 中午"的特殊处理 |
 | 2026-10-07 | P1 每周总结：`WeeklySummary` 表 + 迁移、`WeeklySummaryService`、`GET /api/ai/weekly-summary`、Dashboard 卡片；语言白名单 `en`/`zh`；用真实模型验证后，提示词明确要求称为"上周" |
 | 2026-10-07 | P2：T-4 `get_rank`、T-5 `get_points_summary`；话题按钮作为对话模式（§5.3、D-13），取代原来的推荐问题 |
+| 2026-10-07 | P1 和 P2 已部署（`01ebacd`）：CI 和 Deploy 通过，新接口已上线（未登录时返回 401），`WeeklySummaries` 迁移已执行 |
+| 2026-10-07 | 话题按钮从"保持选中的模式"改为"点一下就发送"；`mode` 只作用于这一条消息（CM-2、CM-3、D-13） |
+| 2026-10-07 | 每周总结改为只用英文（D-10、WS-3）；去掉 `lang` 参数；保留 `Language` 列以备将来使用 |

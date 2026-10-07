@@ -9,35 +9,29 @@ public record WeeklySummaryResult(DateOnly WeekStart, DateOnly WeekEnd, string S
 
 // AI weekly summary (spec §5.2). Summarizes the last complete Monday–Sunday
 // week: every number is computed here (D-6) and the model only writes prose.
-// Results are cached per user/week/language (WS-4); a week with no workouts
-// gets a fixed message without calling the model at all (WS-5).
+// Results are cached per user and week (WS-4); a week with no workouts gets a
+// fixed message without calling the model at all (WS-5). Always English, to
+// match the rest of the UI (D-10).
 public class WeeklySummaryService
 {
     public const string SourceAi = "ai";
     public const string SourceCache = "cache";
     public const string SourceFallback = "fallback";
 
-    // An allowlist rather than any browser language: it keeps the number of
-    // cached variants (and model calls) per week bounded.
-    private static readonly Dictionary<string, string> LanguageNames = new()
-    {
-        ["en"] = "English",
-        ["zh"] = "Simplified Chinese",
-    };
+    // The table keeps a Language column (part of the unique key) so other
+    // languages can be added later without a migration; today it's always this.
+    private const string Language = "en";
 
-    private static readonly Dictionary<string, string> FallbackMessages = new()
-    {
-        ["en"] = "No workouts were logged last week — a fresh week is the perfect time to start. Even one short session counts toward your goal!",
-        ["zh"] = "上周还没有运动记录。新的一周正是开始的好时机，哪怕一次简短的运动也会计入你的目标！",
-    };
+    private const string FallbackMessage =
+        "No workouts were logged last week — a fresh week is the perfect time to start. Even one short session counts toward your goal!";
 
     // §9 — kept in sync with the spec
-    private const string SystemPromptTemplate =
+    private const string SystemPrompt =
         "You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's previous week (the " +
         "Monday–Sunday range in the JSON stats provided). The user reads this during the following week, so " +
         "always call it \"last week\" (never \"this week\"). Use only the numbers given; never invent data. " +
-        "End with one concrete, achievable " +
-        "suggestion for next week. Write in {0}. No medical advice. Plain text only — no Markdown, headings or lists.";
+        "End with one concrete, achievable suggestion for next week. Write in English. No medical advice. " +
+        "Plain text only — no Markdown, headings or lists.";
 
     private const int MaxSummaryTokens = 512;
 
@@ -50,28 +44,20 @@ public class WeeklySummaryService
         _model = model;
     }
 
-    // "zh-CN" / "zh-TW" / "zh" → "zh"; anything unsupported → "en"
-    internal static string NormalizeLanguage(string? lang)
+    public async Task<WeeklySummaryResult> GetAsync(int userId, DateOnly today, CancellationToken ct = default)
     {
-        var primary = (lang ?? "").Split('-', '_')[0].Trim().ToLowerInvariant();
-        return LanguageNames.ContainsKey(primary) ? primary : "en";
-    }
-
-    public async Task<WeeklySummaryResult> GetAsync(int userId, DateOnly today, string? lang, CancellationToken ct = default)
-    {
-        var language = NormalizeLanguage(lang);
         var weekStart = ChatToolExecutor.StartOfWeek(today).AddDays(-7);
         var weekEnd = weekStart.AddDays(6);
 
-        var cached = await FindCached(userId, weekStart, language, ct);
+        var cached = await FindCached(userId, weekStart, ct);
         if (cached is not null) return new(weekStart, weekEnd, cached, SourceCache);
 
         var stats = await BuildStats(userId, weekStart, weekEnd, ct);
-        if (stats is null) return new(weekStart, weekEnd, FallbackMessages[language], SourceFallback);
+        if (stats is null) return new(weekStart, weekEnd, FallbackMessage, SourceFallback);
 
         var response = await _model.CompleteAsync(new ChatRequest(
             [
-                ChatMessage.System(string.Format(SystemPromptTemplate, LanguageNames[language])),
+                ChatMessage.System(SystemPrompt),
                 ChatMessage.User(JsonSerializer.Serialize(stats, JsonSerializerOptions.Web)),
             ],
             MaxTokens: MaxSummaryTokens), ct);
@@ -80,7 +66,7 @@ public class WeeklySummaryService
         if (string.IsNullOrEmpty(summary))
             throw new ChatModelException("The model returned an empty summary.");
 
-        var entity = new WeeklySummary { UserId = userId, WeekStart = weekStart, Language = language, Content = summary };
+        var entity = new WeeklySummary { UserId = userId, WeekStart = weekStart, Language = Language, Content = summary };
         _db.WeeklySummaries.Add(entity);
         try
         {
@@ -91,7 +77,7 @@ public class WeeklySummaryService
             // Two requests for the same week raced and the other one saved first
             // (unique index). Drop ours and serve the stored copy.
             _db.Entry(entity).State = EntityState.Detached;
-            var winner = await FindCached(userId, weekStart, language, ct);
+            var winner = await FindCached(userId, weekStart, ct);
             if (winner is null) throw;
             return new(weekStart, weekEnd, winner, SourceCache);
         }
@@ -99,9 +85,9 @@ public class WeeklySummaryService
         return new(weekStart, weekEnd, summary, SourceAi);
     }
 
-    private Task<string?> FindCached(int userId, DateOnly weekStart, string language, CancellationToken ct) =>
+    private Task<string?> FindCached(int userId, DateOnly weekStart, CancellationToken ct) =>
         _db.WeeklySummaries
-            .Where(s => s.UserId == userId && s.WeekStart == weekStart && s.Language == language)
+            .Where(s => s.UserId == userId && s.WeekStart == weekStart && s.Language == Language)
             .Select(s => s.Content)
             .FirstOrDefaultAsync(ct);
 

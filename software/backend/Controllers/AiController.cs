@@ -105,16 +105,15 @@ public class AiController : ControllerBase
         return new EmptyResult();
     }
 
-    // Summary of the last complete week (spec §5.2). lang comes from the
-    // browser (navigator.language); only model calls are logged, not cache hits
-    // or the no-data fallback.
+    // Summary of the last complete week (spec §5.2). Only model calls are
+    // logged, not cache hits or the no-data fallback.
     [HttpGet("weekly-summary")]
-    public async Task<IActionResult> GetWeeklySummary([FromQuery] string? lang, [FromQuery] string? localDate, CancellationToken ct)
+    public async Task<IActionResult> GetWeeklySummary([FromQuery] string? localDate, CancellationToken ct)
     {
         var today = CheckInController.ResolveToday(localDate);
         try
         {
-            var result = await _weeklySummary.GetAsync(UserId, today, lang, ct);
+            var result = await _weeklySummary.GetAsync(UserId, today, ct);
             if (result.Source == WeeklySummaryService.SourceAi)
                 await _tracker.SaveAsync(UserId, AiFeatures.WeeklySummary, success: true);
             return Ok(result);

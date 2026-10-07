@@ -10,10 +10,10 @@ import type { ChatQuota, ChatTurn } from '../types'
 const MAX_MESSAGE_LENGTH = 1000 // matches ChatAssistantService.MaxMessageLength
 const MAX_HISTORY_TURNS = 20 // CA-7; the server caps it too
 
-// Topic pills above the input (spec §5.3). Picking one sends its id as `mode`,
-// which gives the model topic-specific instructions and only the tools that
-// topic needs. Sending with an empty input uses the pill's default prompt.
-// Ids must match ChatModes on the backend.
+// Topic pills above the input (spec §5.3). One click sends the pill's prompt
+// straight away, tagged with its id as `mode` — the backend then gives the
+// model topic-specific instructions and only the tools that topic needs.
+// The mode applies to that one message only. Ids must match ChatModes.
 interface ChatModeOption {
   id: string
   label: string
@@ -72,8 +72,6 @@ export default function ChatWidget() {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
-  // Stays selected for follow-ups until the user clears it, like a tool toggle
-  const [mode, setMode] = useState<ChatModeOption | null>(null)
   const [busy, setBusy] = useState(false)
   const [toolStatus, setToolStatus] = useState<string | null>(null)
   const [quota, setQuota] = useState<ChatQuota | null>(null)
@@ -165,7 +163,8 @@ export default function ChatWidget() {
     if (index !== -1) send(messages[index].text, messages.slice(0, index), messages[index].mode ?? null)
   }
 
-  const submit = () => send(input, messages, mode)
+  // Typed messages carry no mode, so all tools stay available
+  const submit = () => send(input, messages, null)
 
   const last = messages[messages.length - 1]
   const waitingForFirstText = busy && last?.role === 'assistant' && !last.text
@@ -281,23 +280,15 @@ export default function ChatWidget() {
           {/* Topic pills — horizontally scrollable so they fit on narrow screens */}
           <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1" role="group" aria-label="Topics">
             {MODES.map((m) => {
-              const selected = mode?.id === m.id
               return (
                 <button
                   key={m.id}
                   type="button"
-                  aria-pressed={selected}
-                  onClick={() => {
-                    setMode(selected ? null : m)
-                    inputRef.current?.focus()
-                  }}
-                  className={`flex-shrink-0 flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition cursor-pointer ${
-                    selected ? 'text-white border-transparent' : 'border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-inset)]'
-                  }`}
-                  style={selected ? { backgroundColor: 'var(--primary)' } : undefined}
+                  onClick={() => send(m.prompt, messages, m)}
+                  disabled={busy}
+                  className="flex-shrink-0 text-xs px-2.5 py-1 rounded-full border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-inset)] transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {m.label}
-                  {selected && <span aria-hidden="true">×</span>}
                 </button>
               )
             })}
@@ -316,13 +307,13 @@ export default function ChatWidget() {
               }}
               rows={1}
               maxLength={MAX_MESSAGE_LENGTH}
-              placeholder={mode ? 'Add details, or just send' : 'Ask about your progress…'}
+              placeholder="Ask about your progress…"
               aria-label="Message"
               className="flex-1 resize-none max-h-28 px-3 py-2 text-sm rounded-xl border border-[var(--border)] bg-[var(--bg-page)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--primary-light)]"
             />
             <button
               type="submit"
-              disabled={busy || (!input.trim() && !mode)}
+              disabled={busy || !input.trim()}
               className="px-3 py-2 text-sm font-medium text-white rounded-xl disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               style={{ backgroundColor: 'var(--primary)' }}
             >

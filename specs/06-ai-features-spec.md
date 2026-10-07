@@ -1,6 +1,6 @@
 # AI Features Spec — Chat Assistant & Weekly Summary
 
-**Status:** P0 shipped to production (2026-10-07, commit `45fce57`); P1 + P2 done locally (demo data, weekly summary, T-4/T-5, topic pills), not yet deployed
+**Status:** P0, P1 and P2 shipped to production (2026-10-07; P0 `45fce57`, P1 + P2 `01ebacd`). Demo account on production still to be seeded.
 **Created:** 2026-10-06
 **Deadline:** 1 day (P0 must ship; P1/P2 as time allows)
 
@@ -46,10 +46,10 @@ Non-goal: maximizing the number of AI features.
 | D-7 | **Chat history lives in the frontend only** | Cleared on refresh. Avoids a new table and keeps conversation content out of the database. Client-sent history is safe to trust because tools are scoped to the JWT user regardless. |
 | D-8 | **Monitoring is not exposed in-app** | The app has no admin role, so any monitoring endpoint would be visible to every user. Usage is queried in the Neon console; logs in Azure Log Stream; spend in the DeepSeek dashboard. |
 | D-9 | **Weekly summary covers the last complete week** | Complete data, generated once per week, simplest caching, lowest cost. |
-| D-10 | **Language** — chat follows the user's input; weekly summary follows the browser language | The summary has no user input to follow, so `navigator.language` is passed from the frontend. |
+| D-10 | **Language** — chat follows the user's input; the weekly summary is always English | The UI is English throughout. The summary first followed the browser language, but a Chinese paragraph inside an English Dashboard looked out of place, so it was switched to English only (2026-10-07). |
 | D-11 | **Model: `deepseek-flash` with thinking disabled** (`"thinking": { "type": "disabled" }`) | Thinking is on by default. In thinking mode, any request that carries `tools` must replay every earlier `reasoning_content`, across user turns too, or the API returns 400. That conflicts with D-7 (the frontend keeps only text), and the extra tokens add latency on an Azure-Australia → DeepSeek round trip. Looking up and summarizing a few numbers doesn't need deep reasoning. |
 | D-12 | **Client: a thin typed `HttpClient` wrapper over DeepSeek's OpenAI-format `/chat/completions`**, not a third-party SDK | We need DeepSeek-specific fields (`thinking`) that the OpenAI .NET SDK doesn't model; a ~150-line client gives full control over the request body, SSE parsing, tool-call delta accumulation, and `usage`. It sits behind `IChatModel` (D-3), so swapping to an SDK later is local. |
-| D-13 | **Topic pills are modes, not canned questions** — each sends `mode`, which adds topic instructions and narrows the tool list (§5.3) | Discoverability like product "tool" chips, and fewer wrong tool choices for the model. A pill never bypasses the model to call an endpoint directly; that would just duplicate existing buttons. |
+| D-13 | **Topic pills send in one click, tagged with a `mode`** — the mode adds topic instructions and narrows the tool list for that message (§5.3) | One-tap answers and discoverability, plus fewer wrong tool choices for the model. First built as a sticky selectable mode; changed to one-click after trying it in the UI. A pill never bypasses the model to call an endpoint directly; that would just duplicate existing buttons. |
 
 ## 4. Architecture
 
@@ -99,18 +99,18 @@ Backend (ASP.NET Core)                          ▼     ▼
 |---|---|---|
 | WS-1 | Dashboard card shows a 3–4 sentence summary of the last complete week (Mon–Sun) | Mentions active days, total calories, goal completion; ends with one suggestion |
 | WS-2 | Stats are computed in C#; the model only writes prose | Every number in the summary matches the DB (D-6) |
-| WS-3 | Language follows the browser | Frontend sends `lang` (from `navigator.language`) |
+| WS-3 | Always English, matching the UI | No language parameter is sent |
 | WS-4 | Cached per user per week | Second load of the same week makes no model call |
 | WS-5 | No data → no model call | If last week has no workouts (incl. new users), a fixed encouraging message is returned with `source: "fallback"` |
 | WS-6 | Graceful failure | On model error, the card shows "Summary unavailable right now"; the Dashboard still loads |
 
 Implementation notes (`backend/Services/Ai/WeeklySummaryService.cs`, `frontend/src/components/WeeklySummaryCard.tsx`):
-- Supported languages are an allowlist — `en` and `zh` (`zh-CN`, `zh_TW` → `zh`); anything else falls back to `en`. This bounds the cached variants and model calls per week.
+- English only (D-10). The `Language` column stays in the table and the unique key, always `"en"`, so languages can be added later without a migration.
 - Stats sent to the model: `weekStart`, `weekEnd`, `workoutCount`, `activeDays`, `totalCalories`, `weeklyCalorieGoal`, `goalPercent`, `previousWeekCalories`, `checkInDays`, `byType`. No names or notes (D-4).
 - Only real model calls write an `AiUsageLog` row (`weekly_summary`); cache hits and the fallback don't. Model failures return `503` and are logged as failures.
 - A concurrent duplicate insert (unique index) is caught and the stored copy is served.
 - The card sits as a full-width row above the Dashboard's 2×2 grid, with an "AI summary" badge (hidden for the fallback) and a Retry on error.
-- Real DeepSeek check (2026-10-07, local): numbers matched in English and Chinese; cache hit ~6 ms; new user got the fallback with no model call. The first Chinese run called the period "本周" (this week) — the prompt now pins it to "last week", and three regenerations were all correct.
+- Real DeepSeek check (2026-10-07, local, while it still supported Chinese): numbers matched in English and Chinese; cache hit ~6 ms; new user got the fallback with no model call. The first Chinese run called the period "本周" (this week) — the prompt now pins it to "last week", and three regenerations were all correct.
 
 ### 5.3 Topic pills / chat modes (P2)
 
@@ -119,8 +119,8 @@ Implementation notes (`backend/Services/Ai/WeeklySummaryService.cs`, `frontend/s
 | ID | Requirement | Acceptance criteria |
 |---|---|---|
 | CM-1 | Pills above the input: 📊 Weekly review, 💡 Workout advice, 🏆 Rank, 🪙 Points, 🎯 Goal | Always visible (not only on an empty chat); scroll horizontally on narrow screens; replace the old suggested questions (CA-2) |
-| CM-2 | Clicking a pill selects it as the mode; clicking it again clears it | Selected pill is highlighted (`aria-pressed`) with a ×; stays selected for follow-up messages |
-| CM-3 | With a mode selected, Send works with an empty input | The pill's default prompt is sent as the message; typed text is sent instead when present |
+| CM-2 | One click on a pill sends its default prompt immediately — no selected state | Disabled while a reply is streaming |
+| CM-3 | The mode applies to that one message only | Typed messages (including follow-ups after a pill) are sent without `mode` and can use every tool |
 | CM-4 | The request carries `mode`; the backend adds topic instructions to the system prompt and narrows the tool list | e.g. `rank` exposes only T-4; unknown modes return `400` |
 | CM-5 | User bubbles sent with a mode show the topic as a small badge | |
 | CM-6 | Workout advice stays general-fitness only | Mentions of pain, injury or a condition → recommend a professional, no advice |
@@ -190,7 +190,7 @@ The frontend must read this with `fetch` + `ReadableStream` (not `EventSource`, 
 { "used": 6, "limit": 30, "remaining": 24 }
 ```
 
-### `GET /api/ai/weekly-summary?lang=zh-CN&localDate=2026-10-06` (P1)
+### `GET /api/ai/weekly-summary?localDate=2026-10-06` (P1)
 
 ```json
 { "weekStart": "2026-09-28", "weekEnd": "2026-10-04", "summary": "...", "source": "ai" }
@@ -226,7 +226,7 @@ Both tables are added via EF Core migrations and applied automatically on startu
 | `Id` | int PK | |
 | `UserId` | int | Unique index on `(UserId, WeekStart, Language)` |
 | `WeekStart` | DateOnly | Monday |
-| `Language` | string | Normalized, e.g. `"zh"` / `"en"` |
+| `Language` | string | Always `"en"` for now (D-10) |
 | `Content` | string | |
 | `CreatedAt` | DateTime (UTC) | |
 
@@ -238,7 +238,7 @@ Both tables are added via EF Core migrations and applied automatically on startu
 > Today is {Weekday, yyyy-MM-dd} in the user's time zone.
 
 **Weekly summary system prompt:**
-> You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's previous week (the Monday–Sunday range in the JSON stats provided). The user reads this during the following week, so always call it "last week" (never "this week"). Use only the numbers given; never invent data. End with one concrete, achievable suggestion for next week. Write in {language}. No medical advice. Plain text only — no Markdown, headings or lists.
+> You are an encouraging fitness coach. Write a 3–4 sentence summary of the user's previous week (the Monday–Sunday range in the JSON stats provided). The user reads this during the following week, so always call it "last week" (never "this week"). Use only the numbers given; never invent data. End with one concrete, achievable suggestion for next week. Write in English. No medical advice. Plain text only — no Markdown, headings or lists.
 
 ## 10. Non-Functional Requirements
 
@@ -351,3 +351,6 @@ Replies use light Markdown (`**bold**`, `-` lists) and emoji — the frontend re
 | 2026-10-07 | Fixed the pre-existing streak bug: continuation is now judged from `CheckIns.Date` (local) instead of the UTC date of `LastCheckIn`, in `CheckInController` and T-2; seed script no longer needs the noon-UTC workaround |
 | 2026-10-07 | P1 weekly summary: `WeeklySummary` table + migration, `WeeklySummaryService`, `GET /api/ai/weekly-summary`, Dashboard card; `en`/`zh` language allowlist; prompt pinned to "last week" after a real-model check |
 | 2026-10-07 | P2: T-4 `get_rank`, T-5 `get_points_summary`; topic pills as chat modes (§5.3, D-13) replacing the suggested questions |
+| 2026-10-07 | P1 + P2 deployed (`01ebacd`): CI + Deploy green, new endpoints live (401 without auth), `WeeklySummaries` migration applied |
+| 2026-10-07 | Topic pills changed from a sticky selectable mode to one-click send; `mode` now applies to that single message (CM-2, CM-3, D-13) |
+| 2026-10-07 | Weekly summary switched to English only (D-10, WS-3); `lang` parameter removed; `Language` column kept for future use |
